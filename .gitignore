@@ -1,0 +1,12 @@
+# Local pi agent state.
+/.pi/
+
+# Build and test output.
+/src/**/bin/
+/src/**/obj/
+/tests/**/bin/
+/tests/**/obj/
+/tests/**/TestResults/
+/TestResults/
+/.vs/
+*.csproj.user

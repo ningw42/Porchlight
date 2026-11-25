@@ -1,0 +1,26 @@
+<Window x:Class="Porchlight.App.MainWindow" Title="Porchlight"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid Padding="12" RowSpacing="8">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+    <Grid ColumnSpacing="8">
+      <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <TextBox x:Name="PipePath" Header="Local HerdR gateway pipe" PlaceholderText="Enter the full local named pipe path" />
+      <Button x:Name="ConnectButton" Grid.Column="1" VerticalAlignment="Bottom" Click="Connect_Click">Connect</Button>
+    </Grid>
+    <TextBlock x:Name="CoreLabel" Grid.Row="1" TextWrapping="Wrap" IsTextSelectionEnabled="True"/>
+    <Grid Grid.Row="2" ColumnSpacing="8">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="2*"/><ColumnDefinition Width="3*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <ComboBox x:Name="MachinePicker" Header="Machine" PlaceholderText="Select a machine" HorizontalAlignment="Stretch"
+                SelectionChanged="MachineChanged" DropDownOpened="MachinesOpened" />
+      <ComboBox x:Name="Picker" Grid.Column="1" Header="Live terminal" HorizontalAlignment="Stretch" PlaceholderText="Select a program" SelectionChanged="SelectionChanged" />
+      <Button x:Name="Attach" Grid.Column="2" VerticalAlignment="Bottom" Click="Attach_Click">Attach</Button>
+      <Button x:Name="Disconnect" Grid.Column="3" VerticalAlignment="Bottom" Click="Disconnect_Click">Disconnect</Button>
+    </Grid>
+    <TextBlock x:Name="Status" Grid.Row="3" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+    <Border x:Name="PaneHost" Grid.Row="4" Background="#282c34" CornerRadius="4" />
+  </Grid>
+</Window>
