@@ -2,13 +2,14 @@ using System.Text.Json;
 
 namespace Porchlight.Core;
 
-// Only the part of the herdr-app document needed for space order, names and membership.
+// Only the part of the herdr-app document needed for names, space order and membership.
 internal sealed class SpaceLayout
 {
     sealed record Definition(string Name, string SavedFolder, string? FirstTerminal);
     // User moves are published as the order of spaces[]; names and IDs do not encode it.
     readonly OrderedDictionary<string, Definition> spaces = new(StringComparer.Ordinal);
-    readonly Dictionary<string, string> panes = new(StringComparer.Ordinal);
+    sealed record Placement(string SpaceId, string? TabName);
+    readonly Dictionary<string, Placement> panes = new(StringComparer.Ordinal);
     public IEnumerable<string> OrderedIds => spaces.Keys;
 
     public static SpaceLayout Read(JsonElement value)
@@ -18,32 +19,33 @@ internal sealed class SpaceLayout
         {
             if (Text(entry, "id") is not { } id || layout.spaces.ContainsKey(id)) continue;
             string? first = null;
-            foreach (var tab in Items(entry, "tabs")) layout.Visit(Property(tab, "root"), id, ref first);
+            foreach (var tab in Items(entry, "tabs"))
+                layout.Visit(Property(tab, "root"), new Placement(id, Text(tab, "name")), ref first);
             layout.spaces.Add(id, new(StringValue(entry, "name") ?? "", StringValue(entry, "folder") ?? "", first));
         }
         return layout;
     }
 
-    void Visit(JsonElement node, string spaceId, ref string? first)
+    void Visit(JsonElement node, Placement placement, ref string? first)
     {
         switch (Text(node, "type"))
         {
             case "block":
-                var terminal = AddContent(node, spaceId);
+                var terminal = AddContent(node, placement);
                 first ??= terminal;
                 break;
             case "row": case "column": case "stack":
-                foreach (var child in Items(node, "children")) Visit(child, spaceId, ref first);
+                foreach (var child in Items(node, "children")) Visit(child, placement, ref first);
                 break;
         }
         // Floats have membership but are not nodes in HerdR's Node::terminals() walk.
-        foreach (var floating in Items(node, "floating")) AddContent(floating, spaceId);
+        foreach (var floating in Items(node, "floating")) AddContent(floating, placement);
     }
 
-    string? AddContent(JsonElement node, string spaceId)
+    string? AddContent(JsonElement node, Placement placement)
     {
         var terminal = StringValue(Property(node, "content"), "terminal");
-        if (LiveTerminal.IsAddress(terminal)) panes.TryAdd(terminal!, spaceId);
+        if (LiveTerminal.IsAddress(terminal)) panes.TryAdd(terminal!, placement);
         return terminal;
     }
 
@@ -77,12 +79,15 @@ internal sealed class SpaceLayout
         return true;
     }
 
-    public TerminalSpace Resolve(LiveTerminal terminal, IReadOnlyDictionary<string, TerminalSpace> names)
+    public (TerminalSpace Space, string? StoredName) Locate(LiveTerminal terminal, IReadOnlyDictionary<string, TerminalSpace> names)
     {
         var address = terminal.Address;
         // A remote document is machine-local. Some gateways also localize terminal fields.
-        var id = panes.GetValueOrDefault(address[(address.IndexOf('/') + 1)..]) ?? panes.GetValueOrDefault(address) ?? terminal.Space.Id;
-        return id != null && names.TryGetValue(id, out var space) ? space : terminal.Space;
+        var pane = panes.GetValueOrDefault(address[(address.IndexOf('/') + 1)..]) ?? panes.GetValueOrDefault(address);
+        var id = pane?.SpaceId ?? terminal.Space.Id;
+        var space = id != null && names.TryGetValue(id, out var saved) ? saved : terminal.Space;
+        // A placed but unnamed tab follows its program, even if hc run supplied a launch name.
+        return (space, pane == null ? terminal.Name : pane.TabName);
     }
 
     static JsonElement Property(JsonElement obj, string key) =>

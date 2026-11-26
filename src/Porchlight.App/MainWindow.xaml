@@ -1,6 +1,6 @@
 <Window x:Class="Porchlight.App.MainWindow" Title="Porchlight"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:core="using:Porchlight.Core">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives">
   <Window.SystemBackdrop>
     <MicaBackdrop Kind="BaseAlt" />
   </Window.SystemBackdrop>
@@ -29,13 +29,16 @@
       </Grid>
       <TabView x:Name="TerminalTabs" Grid.Column="1" AutomationProperties.Name="Live terminals in this space"
                SelectedIndex="-1" SelectionChanged="TerminalSelected" TabWidthMode="SizeToContent"
+               CloseButtonOverlayMode="OnPointerOver" TabCloseRequested="TerminalCloseRequested"
                IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" AllowDropTabs="False">
-        <TabView.TabItemTemplate>
-          <DataTemplate x:DataType="core:LiveTerminal">
-            <TabViewItem Header="{x:Bind Label}" IsClosable="False" AutomationProperties.Name="{x:Bind Label}"
-                         ToolTipService.ToolTip="{x:Bind Label}" />
-          </DataTemplate>
-        </TabView.TabItemTemplate>
+        <TabView.Resources>
+          <!-- A space change replaces a list; don't animate it as a sequence of tab opens/closes. -->
+          <Style TargetType="primitives:TabViewListView">
+            <Setter Property="ItemContainerTransitions">
+              <Setter.Value><TransitionCollection /></Setter.Value>
+            </Setter>
+          </Style>
+        </TabView.Resources>
         <TabView.TabStripFooter>
           <Grid x:Name="TabDragArea" MinWidth="48" MinHeight="40" Background="Transparent" />
         </TabView.TabStripFooter>

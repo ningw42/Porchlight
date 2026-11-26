@@ -5,7 +5,9 @@ namespace Porchlight.Core;
 public sealed record LiveTerminal(string Address, string? Name)
 {
     public TerminalSpace Space { get; init; } = TerminalSpace.Unassigned;
-    public string Label => string.IsNullOrEmpty(Name) ? Address : $"{Address} · {Name}";
+    public string Title { get; init; } = Name ?? Address;
+    // The compact header is just Title. Details/automation also disambiguate identical captions.
+    public string Label => Name == null || Name == Title ? $"{Address} · {Title}" : $"{Address} · {Name} · {Title}";
     // The gateway mirrors tN (local) and alias/tN (directly configured machine).
     public string? MachineAlias => Address.IndexOf('/') is >= 0 and var slash ? Address[..slash] : null;
     public override string ToString() => Label;
@@ -21,10 +23,11 @@ public sealed record LiveTerminal(string Address, string? Name)
         id.AsSpan(2).IndexOfAnyExcept(IdAlphabet) < 0;
 }
 
-// Single reader. Expose only the fields the picker needs, never screen/title/argv/status text.
-internal sealed class TerminalCatalog(string? viewerHome = null)
+// Single reader. Derive names at ingestion; never retain command lines or agent reports.
+internal sealed class TerminalCatalog(string? viewerHome = null, ProgramNames? programNames = null)
 {
     readonly string home = viewerHome ?? ViewerHome();
+    readonly ProgramNames programs = programNames ?? ProgramNames.Load();
     static string ViewerHome()
     {
         var userHome = Environment.GetEnvironmentVariable(OperatingSystem.IsWindows() ? "USERPROFILE" : "HOME");
@@ -33,10 +36,13 @@ internal sealed class TerminalCatalog(string? viewerHome = null)
         return profile.Length != 0 ? profile : "/";
     }
 
-    // Directory metadata stays internal: never retain the foreground process's name or argv.
-    sealed record Entry(LiveTerminal Terminal, string? LaunchFolder, string? ForegroundFolder)
+    sealed record Entry(LiveTerminal Terminal, string? LaunchFolder, string? ForegroundFolder,
+        ProgramName Launch, ProgramName? Foreground, ProgramName? Agent, string? TitleCandidate)
     {
         public string? Folder => ForegroundFolder ?? LaunchFolder;
+        public LiveTerminal Describe(TerminalSpace space, string? stored) => Terminal with {
+            Space = space, Title = TabTitles.Format(Terminal.Address, stored, Agent ?? Foreground ?? Launch, Agent != null, TitleCandidate)
+        };
     }
     readonly Dictionary<string, Entry> live = new(StringComparer.Ordinal);
     readonly MemoryStream partial = new();
@@ -49,17 +55,25 @@ internal sealed class TerminalCatalog(string? viewerHome = null)
     {
         var visible = new List<LiveTerminal>();
         var layoutSpaces = new Dictionary<string, TerminalSpace[]>();
-        var byMachine = live.Values.Select(e => e.Terminal).ToLookup(t => t.MachineAlias, StringComparer.Ordinal);
+        var byMachine = live.Values.ToLookup(e => e.Terminal.MachineAlias, StringComparer.Ordinal);
         foreach (var machine in machines.Where(m => m.Available))
         {
             var terminals = byMachine[machine.IsLocal ? null : machine.Name];
-            if (layouts?.GetValueOrDefault(machine.Id) is not { } layout) { visible.AddRange(terminals); continue; }
+            if (layouts?.GetValueOrDefault(machine.Id) is not { } layout)
+            {
+                visible.AddRange(terminals.Select(e => e.Describe(e.Terminal.Space, e.Terminal.Name)));
+                continue;
+            }
             var names = layout.NameSpaces(address => {
                 var cwd = PaneFolder(machine, address);
                 return cwd == null || machine.IsLocal && cwd == home ? cwd : checkoutTop?.Invoke(machine, cwd) ?? cwd;
             }, home);
             layoutSpaces[machine.Id] = layout.OrderedIds.Select(id => names[id]).ToArray();
-            visible.AddRange(terminals.Select(t => t with { Space = layout.Resolve(t, names) }));
+            foreach (var entry in terminals)
+            {
+                var (space, stored) = layout.Locate(entry.Terminal, names);
+                visible.Add(entry.Describe(space, stored));
+            }
         }
         visible.Sort((a, b) => string.CompareOrdinal(a.Address, b.Address));
         return new(machines, visible.AsReadOnly()) { LayoutSpaces = layoutSpaces };
@@ -86,10 +100,12 @@ internal sealed class TerminalCatalog(string? viewerHome = null)
         if (!LiveTerminal.IsAddress(id)) return false;
         if (t.GetProperty("state").GetString() != "live" || (t.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String))
             return live.Remove(id!);
-        var item = new LiveTerminal(id!, t.TryGetProperty("name", out var n) ? n.GetString() : null) {
+        var item = new LiveTerminal(id!, SpaceLayout.Text(t, "name")) {
             Space = t.TryGetProperty("labels", out var labels) ? LabelSpace(labels) : TerminalSpace.Unassigned
         };
-        var entry = new Entry(item, Folder(t), t.TryGetProperty("foreground", out var fg) ? Folder(fg) : null);
+        t.TryGetProperty("foreground", out var fg);
+        var entry = new Entry(item, Folder(t), Folder(fg), programs.FromArgv(t) ?? programs.Shell, programs.FromArgv(fg),
+            Agent(t), TabTitles.Candidate(SpaceLayout.Text(t, "title")));
         if (live.GetValueOrDefault(id!) == entry) return false;
         live[id!] = entry;
         return true;
@@ -98,12 +114,23 @@ internal sealed class TerminalCatalog(string? viewerHome = null)
     static string? Folder(JsonElement record) => record.ValueKind == JsonValueKind.Object &&
         record.TryGetProperty("cwd", out var cwd) && cwd.ValueKind == JsonValueKind.String ? cwd.GetString() : null;
 
-    bool Foreground(string address, JsonElement data)
+    ProgramName? Agent(JsonElement data) => data.ValueKind == JsonValueKind.Object && data.TryGetProperty("status", out var status) &&
+        SpaceLayout.Text(status, "app") is { } app ? programs.Agent(app) : null;
+
+    bool Observe(string type, string address, JsonElement data)
     {
         if (!live.TryGetValue(address, out var prior)) return false;
-        var updated = prior with { ForegroundFolder = Folder(data) }; // null clears the whole observation
+        var updated = type switch {
+            "foreground" => prior with { ForegroundFolder = Folder(data), Foreground = programs.FromArgv(data) },
+            "status" => prior with { Agent = Agent(data) },
+            "title" => prior with { TitleCandidate = TabTitles.Candidate(SpaceLayout.Text(data, "title")) },
+            _ => prior
+        };
+        if (updated == prior) return false;
         live[address] = updated;
-        return updated.Folder != prior.Folder;
+        // Keep hidden observations for later (e.g. the agent clears its status); don't redraw for them.
+        return updated.Folder != prior.Folder || updated.Agent != prior.Agent ||
+            (updated.Agent == null ? updated.Foreground != prior.Foreground : updated.TitleCandidate != prior.TitleCandidate);
     }
 
     static TerminalSpace LabelSpace(JsonElement labels) => TerminalSpace.FromLabel(SpaceLayout.Text(labels, "herdr.space"));
@@ -160,7 +187,7 @@ internal sealed class TerminalCatalog(string? viewerHome = null)
                 if (!p.TryGetProperty("terminal", out var address) || !LiveTerminal.IsAddress(address.GetString())) return false;
                 return type switch {
                     "labels" => Relabel(address.GetString()!, p.GetProperty("data")),
-                    "foreground" => Foreground(address.GetString()!, p.GetProperty("data")),
+                    "foreground" or "status" or "title" => Observe(type, address.GetString()!, p.GetProperty("data")),
                     "created" or "restarted" when p.GetProperty("data").GetProperty("address").GetString() == address.GetString() => Update(p.GetProperty("data")),
                     "removed" or "finished" or "lost" => live.Remove(address.GetString()!),
                     _ => false

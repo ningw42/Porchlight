@@ -16,7 +16,6 @@ public sealed partial class MainWindow : Window
     HerdMachine? selectedMachine;
     TerminalSpace? selectedSpace;
     Target? suggested;
-    IReadOnlyList<LiveTerminal> shownTerminals = [];
     Task? connecting;
     bool configured, busy, closing, mayClose, active, updatingSelection, userChoseScope;
     string? viewerNotice;
@@ -149,10 +148,7 @@ public sealed partial class MainWindow : Window
             selectedMachine = machine; selectedSpace = space;
             ShowMachineGroups(catalog);
             var items = machine != null && space != null ? catalog.TerminalsIn(machine, space) : [];
-            if (!shownTerminals.SequenceEqual(items)) TerminalTabs.TabItemsSource = shownTerminals = items;
-            // Only an explicit tab selection attaches, never a launch hint or a catalog refresh.
-            TerminalTabs.SelectedItem = requested is { } pick && pick.MachineId == machine?.Id ?
-                shownTerminals.FirstOrDefault(t => t.Address == pick.Address) : null;
+            ShowTerminalTabs(machine, items);
         }
         finally { updatingSelection = false; }
         SelectionStatus(); Controls();
@@ -203,9 +199,9 @@ public sealed partial class MainWindow : Window
     void TerminalSelected(object sender, SelectionChangedEventArgs e)
     {
         if (updatingSelection || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
-            selectedSpace == null || TerminalTabs.SelectedItem is not LiveTerminal terminal) return;
+            TerminalTabs.SelectedItem is not TabViewItem { Tag: Target target } || target.MachineId != machine.Id) return;
         suggested = null; viewerNotice = null; userChoseScope = true;
-        RequestViewer(new(machine.Id, terminal.Address));
+        RequestViewer(target);
     }
 
     void SelectionStatus()
@@ -214,7 +210,7 @@ public sealed partial class MainWindow : Window
         ShowStatus(viewerNotice ?? (selectedMachine switch {
             { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
             _ when selectedSpace == null => "Select a space in the sidebar.",
-            _ when shownTerminals.Count == 0 => "No live terminals in this space.",
+            _ when shownTabs.Length == 0 => "No live terminals in this space.",
             _ => ""
         }));
     }

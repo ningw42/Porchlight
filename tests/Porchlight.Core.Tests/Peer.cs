@@ -11,10 +11,11 @@ sealed class Peer : IDisposable
     internal const string Address = "t74";
     internal static object Target(string id = Address) => new { address = id, state = "live", name = "fixture" };
     readonly NamedPipeServerStream pipe;
-    readonly CancellationTokenSource deadline = new(TimeSpan.FromSeconds(10));
+    readonly CancellationTokenSource deadline;
     internal CoreEndpoint Endpoint { get; }
-    internal Peer()
+    internal Peer(int timeoutSeconds = 10)
     {
+        deadline = new(TimeSpan.FromSeconds(timeoutSeconds));
         var name = "porchlight-test-" + Guid.NewGuid().ToString("N");
         Endpoint = CoreEndpoint.Select(CoreEndpoint.Prefix + name);
         // Let a complete CLOSE ack reach the pipe while the client reader is blocked in
@@ -22,7 +23,7 @@ sealed class Peer : IDisposable
         pipe = new(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
             inBufferSize: 4096, outBufferSize: 4096);
     }
-    internal async Task Hello(bool auto = true, int generation = 1, bool machines = false, bool docs = false, bool exec = false)
+    internal async Task Hello(bool auto = true, int generation = 1, bool machines = false, bool docs = false, bool exec = false, bool kill = false)
     {
         await pipe.WaitForConnectionAsync(deadline.Token);
         using var line = new MemoryStream(); byte[] one = [0];
@@ -33,6 +34,7 @@ sealed class Peer : IDisposable
         if (machines) methods.Add("machine.list");
         if (docs) methods.Add("doc.get");
         if (exec) methods.Add("machine.exec");
+        if (kill) methods.Add("terminal.kill");
         await pipe.WriteAsync(JsonSerializer.SerializeToUtf8Bytes(new { jsonrpc="2.0", id=1, result=new { core=new { id="peer", name="test" },
             version="test", generation, framed=true, methods, features=auto ? new[]{"automatic_input"} : [] } }), deadline.Token);
         await pipe.WriteAsync("\n"u8.ToArray(), deadline.Token);

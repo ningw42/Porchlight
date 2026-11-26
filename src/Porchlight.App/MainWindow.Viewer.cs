@@ -92,7 +92,7 @@ public sealed partial class MainWindow
         {
             if (await bridge.Ready && Current())
             {
-                AutomationProperties.SetName(PaneHost, label);
+                AutomationProperties.SetName(PaneHost, TerminalTabs.SelectedItem is TabViewItem tab ? AutomationProperties.GetName(tab) : label);
                 ShowStatus();
                 if (active && FocusManager.GetFocusedElement(control.XamlRoot) is null or TabViewItem)
                     control.Focus(FocusState.Programmatic);

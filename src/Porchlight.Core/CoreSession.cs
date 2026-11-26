@@ -30,9 +30,11 @@ public sealed class CoreSession : IAsyncDisposable
     IReadOnlyList<HerdMachine> machines = [];
     MachineDirectory directory = new([], []);
     bool refreshingMachines, supportsDocuments, supportsCheckout;
-    // After hello/subscription, odd IDs are unique attach attempts; even IDs >= 6
-    // are reader-owned metadata requests. A late RPC reply can never grant a new lease.
-    int nextAttachId = 3, nextMetadataId = 6;
+    // Odd IDs are unique user actions (attach or kill), allocated under gate.
+    // Even IDs >= 6 remain reader-owned metadata requests.
+    int nextActionId = 3, nextMetadataId = 6;
+    int NextActionId() { int id = nextActionId; nextActionId = checked(id + 2); return id; }
+    (int Id, TaskCompletionSource<bool> Ack)? pendingKill;
     readonly CheckoutNames checkoutNames = new();
     int NextMetadataId() { int id = nextMetadataId; nextMetadataId = checked(id + 2); return id; }
     readonly Dictionary<string, SpaceLayout> layouts = new();
@@ -40,6 +42,7 @@ public sealed class CoreSession : IAsyncDisposable
     readonly Dictionary<string, int> pendingDocuments = new();
     readonly HashSet<string> dirtyDocuments = new();
     public bool SupportsMachineList { get; private set; }
+    public bool SupportsKill { get; private set; }
     public MachineDirectory Directory => Volatile.Read(ref directory);
     public IReadOnlyList<LiveTerminal> Terminals => Directory.Terminals;
     public CoreIdentity Identity { get; private set; } = null!;
@@ -86,6 +89,7 @@ public sealed class CoreSession : IAsyncDisposable
         Identity = new(core.GetProperty("name").GetString() ?? "unnamed", id, h.GetProperty("version").GetString() ?? "unknown");
         helloAuto = Wire.Contains(h,"features","automatic_input");
         SupportsMachineList = Wire.Contains(h, "methods", "machine.list");
+        SupportsKill = Wire.Contains(h, "methods", "terminal.kill");
         supportsDocuments = Wire.Contains(h, "methods", "doc.get");
         supportsCheckout = supportsDocuments && Wire.Contains(h, "methods", "machine.exec");
         JsonElement? listing = null;
@@ -179,6 +183,56 @@ public sealed class CoreSession : IAsyncDisposable
         CatalogChanged?.Invoke();
     }
 
+    void CheckConnected()
+    {
+        if (closing || finished || stop.IsCancellationRequested) throw new CoreException("Connection closed. Reconnect and select again.");
+    }
+
+    string TerminalRoute(string address, string expectedMachineId)
+    {
+        var current = Directory;
+        var target = current.Terminals.FirstOrDefault(t => t.Address == address)
+            ?? throw new CoreException("That program or machine is no longer available. Refresh and select again.");
+        var machine = current.Machines.Single(m => target.MachineAlias is null ? m.IsLocal : !m.IsLocal && m.Name == target.MachineAlias);
+        if (machine.Id != expectedMachineId) throw new CoreException("The selected machine changed. Refresh and select again.");
+        // Pin the outbound route even if a later refresh reassigns this alias.
+        return machine.IsLocal ? address : machine.Id + address[address.IndexOf('/')..];
+    }
+
+    /// Requests termination, not removal. Only the event stream changes the catalog.
+    public async Task KillTerminalAsync(string address, string expectedMachineId)
+    {
+        ArgumentNullException.ThrowIfNull(expectedMachineId);
+        Task<bool> reply;
+        lock (gate)
+        {
+            CheckConnected();
+            if (!SupportsKill) throw new CoreException("This core does not support terminal.kill.");
+            string route = TerminalRoute(address, expectedMachineId);
+            if (pendingKill != null) throw new CoreException("A terminal close is already awaiting confirmation.");
+            int id = NextActionId();
+            var ack = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingKill = (id, ack);
+            reply = ack.Task;
+            Enqueue(new(0, Kind.Data, Wire.Request(id, "terminal.kill", new { terminal = route })));
+        }
+        try
+        {
+            if (!await reply.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false))
+                throw new CoreException("Core refused terminal.kill. Refresh and check the program's state.");
+        }
+        catch (TimeoutException)
+        {
+            // Keep the single slot until the late reply or disconnect. The request might
+            // still take effect; don't retry it or interrupt an unrelated viewer.
+            throw new CoreException("Core did not confirm terminal.kill. Reconnect and check the program's state.");
+        }
+        catch (OperationCanceledException)
+        {
+            throw new CoreException("Connection closed before terminal.kill was confirmed. Reconnect and check the program's state.");
+        }
+    }
+
     public TerminalAttachment Attach(string address, int rows, int cols, Action<char[]> consume, string expectedMachineId)
     {
         TerminalAttachment.CheckSize(rows, cols);
@@ -186,17 +240,10 @@ public sealed class CoreSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(expectedMachineId);
         lock (gate)
         {
-            if (closing || finished || stop.IsCancellationRequested) throw new CoreException("Connection closed. Reconnect and select again.");
+            CheckConnected();
             if (active != null) throw new CoreException("Detach the current viewer before attaching another pane.");
-            var current = Directory;
-            var target = current.Terminals.FirstOrDefault(t => t.Address == address)
-                ?? throw new CoreException("That program or machine is no longer available. Refresh and select again.");
-            var machine = current.Machines.Single(m => target.MachineAlias is null ? m.IsLocal : !m.IsLocal && m.Name == target.MachineAlias);
-            if (machine.Id != expectedMachineId) throw new CoreException("The selected machine changed. Refresh and select again.");
-            // Route by permanent core ID. On reply also require the full displayed address
-            // and its original machine, in case a refresh reassigned the alias meanwhile.
-            string route = machine.IsLocal ? address : machine.Id + address[address.IndexOf('/')..];
-            int id = nextAttachId; nextAttachId = checked(id + 2);
+            string route = TerminalRoute(address, expectedMachineId);
+            int id = NextActionId();
             active = new(this, id, address, expectedMachineId, consume);
             ArmDeadline(active, detach: false);
             Enqueue(new(0, Kind.Data, Wire.Request(id, "terminal.attach", new { terminal = route, rows, cols, history = 2000, observe = false })));
@@ -269,7 +316,12 @@ public sealed class CoreSession : IAsyncDisposable
             lock (gate) end = closing && fault == null ? new(EndKind.Detached, "Viewer closed; no program exit confirmed.") :
                 new(EndKind.Disconnected, fault ?? (ex is CoreException ? ex.Message : "Connection lost or invalid stream. Check the core and reconnect; no program exit confirmed."));
         }
-        lock (gate) { finished = true; ClearDeadline(); writable.Writer.TryComplete(); stop.Cancel(); }
+        lock (gate)
+        {
+            finished = true;
+            pendingKill?.Ack.SetCanceled(); pendingKill = null;
+            ClearDeadline(); writable.Writer.TryComplete(); stop.Cancel();
+        }
         // Async pipe operations observe stop. Join first; disposing a duplex BufferedStream
         // after closing its underlying PipeStream can throw while forwarding Flush.
         try { await Task.WhenAll(r, w).ConfigureAwait(false); } catch { /* end above is authoritative */ }
@@ -302,7 +354,7 @@ public sealed class CoreSession : IAsyncDisposable
                 int id = reply.GetProperty("id").GetInt32();
                 switch (id)
                 {
-                    case >= 3 when (id & 1) != 0: AcceptAttach(id, reply); break;
+                    case >= 3 when (id & 1) != 0: AcceptAction(id, reply); break;
                     case MachineListId: AcceptMachines(reply); break;
                     case >= 6 when id < nextMetadataId:
                         if (checkoutNames.Receive(id, reply)) PublishCatalog();
@@ -368,22 +420,35 @@ public sealed class CoreSession : IAsyncDisposable
         PublishCatalog();
     }
 
-    void AcceptAttach(int id, JsonElement reply)
+    // Null means an ordinary JSON-RPC refusal; malformed responses still fail closed.
+    static JsonElement? ActionResult(JsonElement reply)
+    {
+        if (reply.GetProperty("jsonrpc").GetString() != "2.0") throw new InvalidDataException("Unexpected RPC response.");
+        if (!reply.TryGetProperty("error", out var error)) return reply.GetProperty("result");
+        if (reply.TryGetProperty("result", out _) || error.ValueKind != JsonValueKind.Object ||
+            !error.GetProperty("code").TryGetInt32(out _) || error.GetProperty("message").ValueKind != JsonValueKind.String)
+            throw new InvalidDataException("Invalid RPC error.");
+        return null;
+    }
+
+    void AcceptAction(int id, JsonElement reply)
     {
         lock (gate)
         {
-            if (active is not { Channel: 0 } lease || lease.RequestId != id || reply.GetProperty("jsonrpc").GetString() != "2.0")
-                throw new InvalidDataException("Unexpected attach reply.");
-            if (closing || stop.IsCancellationRequested) throw new OperationCanceledException();
-            if (reply.TryGetProperty("error", out var error))
+            var response = ActionResult(reply);
+            if (pendingKill is { } kill && kill.Id == id)
             {
-                if (reply.TryGetProperty("result", out _) || error.ValueKind != JsonValueKind.Object ||
-                    !error.GetProperty("code").TryGetInt32(out _) || error.GetProperty("message").ValueKind != JsonValueKind.String)
-                    throw new InvalidDataException("Invalid attach error.");
+                pendingKill = null;
+                kill.Ack.SetResult(response.HasValue);
+                return;
+            }
+            if (active is not { Channel: 0 } lease || lease.RequestId != id) throw new InvalidDataException("Unexpected action reply.");
+            if (closing || stop.IsCancellationRequested) throw new OperationCanceledException();
+            if (response is not { } result)
+            {
                 FinishAttachment(lease, new(EndKind.Detached, "Core refused the attachment. Refresh and select a live program."));
                 return;
             }
-            var result = Wire.Result(reply, id, "terminal.attach");
             var ch = Wire.Channel(result);
             string address = lease.Address;
             int slash = address.IndexOf('/');
