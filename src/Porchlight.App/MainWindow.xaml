@@ -93,7 +93,7 @@
         </Grid>
       </SplitView.Pane>
 
-      <Grid Padding="12" RowDefinitions="Auto,*" Background="{ThemeResource LayerFillColorDefaultBrush}">
+      <Grid Padding="12" RowDefinitions="Auto,*" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
         <TextBlock x:Name="Status" Visibility="Collapsed" Margin="0,0,0,8" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
         <Border x:Name="PaneHost" Grid.Row="1" Background="#282c34" CornerRadius="4" />
       </Grid>
