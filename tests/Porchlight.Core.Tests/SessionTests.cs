@@ -14,28 +14,29 @@ public class SessionTests
         Assert.AreEqual(Peer.Address,s.Terminals.Single().Address);
         using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
         var rendered = new StringBuilder();
-        var ack = s.AttachAsync(Peer.Address, 27, 92, chars => {
+        var lease = s.Attach(Peer.Address, 27, 92, chars => {
             rendered.Append(chars); entered.Set(); if (!release.Wait(5000)) throw new TimeoutException();
-        });
-        var q = await p.Call("terminal.attach");
+        }, s.Identity.Id);
+        var (id,q) = await p.Request("terminal.attach");
         Assert.AreEqual(Peer.Address,q.GetProperty("terminal").GetString()); Assert.AreEqual(92,q.GetProperty("cols").GetInt32());
         Assert.AreEqual(27,q.GetProperty("rows").GetInt32()); Assert.AreEqual(2000,q.GetProperty("history").GetInt32());
         Assert.IsFalse(q.GetProperty("observe").GetBoolean());
-        byte[] input = [27, 91, 99]; s.Input(input); input[0] = 0;
-        s.Resize(0x103,0x201); await p.Attached(attach); Assert.IsTrue(await ack);
+        byte[] input = [27, 91, 99]; lease.Input(input); input[0] = 0;
+        lease.Resize(0x103,0x201); await p.Attached(id,auto:attach); Assert.IsTrue(await lease.Accepted);
         CollectionAssert.AreEqual(new byte[]{27,91,99}, await p.Expect(4,0));
         CollectionAssert.AreEqual(new byte[]{1,2,3,1},await p.Expect(4,3));
         await p.Write(4,0,[0xe2]); await p.Credit(4,1); // decoder accepted a partial scalar
         await p.Write(4,0,[0x82,0xac]); Assert.IsTrue(entered.Wait(4000));
         try {
-            s.Input([27,91,99],synchronousReply:true); s.Focus(false); // fence: no credit yet
+            lease.Input([27,91,99],synchronousReply:true); lease.Focus(false); // fence: no credit yet
             CollectionAssert.AreEqual(new byte[]{27,91,99},await p.Expect(4,hello && attach ? (byte)6 : (byte)0));
             CollectionAssert.AreEqual(new byte[]{0},await p.Expect(4,4));
         } finally { release.Set(); }
         await p.Credit(4,2); Assert.AreEqual("€",rendered.ToString());
-        s.Input([1]); var dispose = s.DisposeAsync().AsTask(); s.Input([2]);
+        lease.Input([1]); var dispose = s.DisposeAsync().AsTask(); lease.Input([2]);
         CollectionAssert.AreEqual(new byte[]{1},await p.Expect(4,0)); Assert.IsEmpty(await p.Expect(4,2));
-        await p.Write(4,2,[]); await dispose; Assert.AreEqual(new SessionEnd(EndKind.Detached,"Detached."),await s.Completion);
+        await p.Write(4,2,[]); await dispose.WaitAsync(TimeSpan.FromSeconds(4));
+        Assert.AreEqual(EndKind.Detached,(await lease.Completion).Kind); Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
     }
 
     [TestMethod]
@@ -46,7 +47,7 @@ public class SessionTests
         var stale = Line("event",new {seq=80, type="removed", terminal=Peer.Address});
         await p.Write(9,0,stale[..8]); await p.Subscribe(); await p.Credit(9,8);
         await using var s = await connecting;
-        Assert.ThrowsExactly<CoreException>(() => s.AttachAsync("other/t10",20,80,_=>{}).GetAwaiter().GetResult());
+        Assert.ThrowsExactly<CoreException>(() => s.Attach("other/t10",20,80,_=>{},s.Identity.Id));
         var created = Line("event",new {seq=81,type="created",terminal="t8",data=Peer.Target("t8")});
         byte[] rest = [..stale[8..],..created]; await p.Write(9,0,rest); await p.Credit(9,rest.Length);
         Assert.AreEqual(2,s.Terminals.Count);
@@ -59,42 +60,56 @@ public class SessionTests
     }
     static byte[] Line(string method,object args) => [..JsonSerializer.SerializeToUtf8Bytes(new {jsonrpc="2.0",method,@params=args}),10];
 
-    [TestMethod, DataRow("exit",EndKind.Exited), DataRow("lost",EndKind.Disconnected), DataRow("eof",EndKind.Disconnected),
-     DataRow("empty",EndKind.Disconnected), DataRow("oversize",EndKind.Disconnected)]
+    [TestMethod, DataRow("exit",EndKind.Exited), DataRow("killed",EndKind.Exited), DataRow("holder_lost",EndKind.Disconnected),
+     DataRow("server_stop",EndKind.Disconnected), DataRow("eof",EndKind.Disconnected), DataRow("empty",EndKind.Disconnected),
+     DataRow("malformed",EndKind.Disconnected), DataRow("oversize",EndKind.Disconnected)]
     public async Task OnlyExplicitProcessCloseMeansExit(string mode, EndKind expected)
     {
-        using var p = new Peer(); await using var s = await p.Connect(); await p.Attach(s,_=>{});
+        using var p = new Peer(); await using var s = await p.Connect(); var lease = await p.Attach(s,_=>{});
         switch(mode) {
             case "exit": await p.Write(4,2,"{\"reason\":\"exited\",\"exit_code\":7}"u8.ToArray()); break;
-            case "lost": await p.Write(4,2,"{\"reason\":\"holder_lost\"}"u8.ToArray()); break;
+            case "killed": await p.Write(4,2,"{\"reason\":\"killed\"}"u8.ToArray()); break;
+            case "holder_lost" or "server_stop": await p.Write(4,2,JsonSerializer.SerializeToUtf8Bytes(new {reason=mode})); break;
+            case "malformed": await p.Write(4,2,"{\"reason\":false}"u8.ToArray()); break;
             case "empty": await p.Write(4,2,[]); break;
             case "oversize": await p.Write(4,0,[],(16<<20)+1); break;
             case "eof": p.Dispose(); break;
         }
-        var result = await s.Completion.WaitAsync(TimeSpan.FromSeconds(4)); Assert.AreEqual(expected,result.Kind);
-        if (expected==EndKind.Exited) StringAssert.Contains(result.Message,"7");
+        var result = await lease.Completion.WaitAsync(TimeSpan.FromSeconds(4)); Assert.AreEqual(expected,result.Kind);
+        if (mode == "exit") StringAssert.Contains(result.Message,"7");
+        if (expected == EndKind.Exited || mode is "holder_lost" or "server_stop") await p.Fence();
+        else Assert.AreEqual(EndKind.Disconnected,(await s.Completion.WaitAsync(TimeSpan.FromSeconds(4))).Kind);
     }
 
     [TestMethod]
     public async Task ClosingDuringAttachDoesNotWaitForRpcOrReportExit()
     {
         using var p = new Peer(); await using var s = await p.Connect();
-        var attach = s.AttachAsync(Peer.Address,24,80,_=>{}); await p.Call("terminal.attach");
-        await s.DisposeAsync(); Assert.IsFalse(await attach); Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
+        var lease = s.Attach(Peer.Address,24,80,_=>{},s.Identity.Id); await p.Call("terminal.attach");
+        await s.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(4));
+        Assert.IsFalse(await lease.Accepted); Assert.AreEqual(EndKind.Detached,(await lease.Completion).Kind);
+        Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
     }
     [TestMethod]
     public async Task MissingDetachAckIsBoundedAndNotProgramExit()
     {
-        using var p = new Peer(); await using var s = await p.Connect(); await p.Attach(s,_=>{});
+        using var p = new Peer(); await using var s = await p.Connect(); var lease = await p.Attach(s,_=>{});
         var close = s.DisposeAsync(); await p.Expect(4,2); await close.AsTask().WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
+        Assert.AreEqual(EndKind.Detached,(await lease.Completion).Kind); Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
     }
-    [TestMethod]
-    public async Task WrongTerminalReplyCannotEnableWrites()
+    [TestMethod, DataRow(4,"t99",false), DataRow(0,Peer.Address,false), DataRow(9,Peer.Address,false), DataRow(9,Peer.Address,true)]
+    public async Task InvalidAttachIdentityOrChannelFailsClosed(int channel, string address, bool disposeBeforeReply)
     {
-        using var p = new Peer(); await using var s = await p.Connect(); var ack = s.AttachAsync(Peer.Address,24,80,_=>{});
-        s.Input([65]); await p.Call("terminal.attach"); await p.Reply(3,new {channel=4,terminal=Peer.Target("t99")});
-        Assert.IsFalse(await ack); Assert.AreEqual(EndKind.Disconnected,(await s.Completion).Kind);
+        using var p = new Peer(); await using var s = await p.Connect();
+        var lease = s.Attach(Peer.Address,24,80,_=>{},s.Identity.Id); lease.Input([65]);
+        int id = (await p.Request("terminal.attach")).Id;
+        var closing = disposeBeforeReply ? lease.DisposeAsync().AsTask() : Task.CompletedTask;
+        await p.Attached(id,(uint)channel,address);
+        Assert.IsFalse(await lease.Accepted.WaitAsync(TimeSpan.FromSeconds(4)));
+        Assert.AreEqual(EndKind.Disconnected,(await lease.Completion.WaitAsync(TimeSpan.FromSeconds(4))).Kind);
+        Assert.AreEqual(EndKind.Disconnected,(await s.Completion.WaitAsync(TimeSpan.FromSeconds(4))).Kind);
+        await closing.WaitAsync(TimeSpan.FromSeconds(4));
+        await p.ExpectEnd(); // neither the queued byte nor even CLOSE may be sent on this unvalidated channel
     }
     [TestMethod]
     public async Task AbsentExplicitPipeFailsWithoutFallingBack()

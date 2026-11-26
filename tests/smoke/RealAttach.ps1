@@ -10,6 +10,7 @@ if (!$Pipe.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) -or $Pipe.S
 $nonce = [Guid]::NewGuid().ToString('N'); $name = 'pl-smoke-' + $nonce.Substring(0,16)
 $wire = [IO.Pipes.NamedPipeClientStream]::new('.', $Pipe.Substring($prefix.Length), 'InOut','Asynchronous,CurrentUserOnly','Identification')
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+. "$PSScriptRoot/Find-TerminalItem.ps1"
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -75,7 +76,7 @@ try {
     if ($name -in $existing.name) { throw 'Name collision.' }
     "Core $($hello.core.name) $($hello.version) [$($hello.core.id)] at $Pipe; listed metadata only."
     $record = Call terminal.run @{name=$name;argv=@($python,'-B',$program,$nonce);labels=@{'porchlight-smoke'=$nonce};no_parent=$true;no_notify=$true;wait=$false;keep=$false}
-    if ($record.address -notmatch '^t[0-9]+$' -or $record.address -in $existing.address -or $record.name -cne $name -or $record.labels.'porchlight-smoke' -cne $nonce) { throw 'Unexpected new-terminal identity.' }
+    if ($record.address -cnotmatch '\At[1-9][0-9bcdfghjkmnpqrstvwxyz]*\z' -or $record.address -in $existing.address -or $record.name -cne $name -or $record.labels.'porchlight-smoke' -cne $nonce) { throw 'Unexpected new-terminal identity.' }
     $id=$record.address; $created=$record.created_ms; "Created $id ($name)."
     $aid = [Windows.Automation.AutomationElement]::AutomationIdProperty
     foreach ($pass in 1,2) {
@@ -87,12 +88,18 @@ try {
         $hw = Await 'Porchlight window' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
         CheckOwner $hw; $root=[Windows.Automation.AutomationElement]::FromHandle($hw)
         $label="$id · $name"
-        $attach=Await 'exact core and selected fixture before Attach' {
-            $s=Find $aid Status; $c=Find $aid CoreLabel; $a=Find $aid Attach
-            if ($s.Current.Name -ceq "Selected · $label" -and $c.Current.Name.EndsWith("core $($hello.core.id)") -and $a.Current.IsEnabled) { $a }
+        $picker=Await 'exact core and located fixture before terminal selection' {
+            $s=Find $aid Status; $c=Find $aid CoreLabel; $p=Find $aid Picker
+            if ($s.Current.Name -ceq "Choose $label in Live terminal to view it." -and $c.Current.Name.EndsWith("core $($hello.core.id)") -and $p.Current.IsEnabled) { $p }
         }
-        $attach.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $expand=$picker.GetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern)
+        $expand.Expand()
+        $item=Await 'fixture in the terminal dropdown' { Find-TerminalItem $picker $root $hw $viewer.Id $label }
+        if ($item.Current.ProcessId -ne $viewer.Id -or (Owned).state -ne 'live' -or
+            !(Find $aid CoreLabel).Current.Name.EndsWith("core $($hello.core.id)")) { throw 'Fixture or window identity changed; refusing selection.' }
+        $item.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
         [void](Await 'attached identity' { (Find $aid Status).Current.Name -ceq "Attached · $label" })
+        if ($expand.Current.ExpandCollapseState -eq 'Expanded') { $expand.Collapse() }
         $pane=Find ([Windows.Automation.AutomationElement]::ClassNameProperty) 'TermControl'
         if (!$pane) { throw 'No native terminal control.' }
         $initial=Await 'program challenge in the native buffer' { FrameState ($pass-1) }

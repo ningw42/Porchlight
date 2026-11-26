@@ -7,12 +7,37 @@ namespace Porchlight.Core;
 public sealed record HerdMachine(string Id, string Name, string State, bool IsLocal)
 {
     public bool Available => State == "connected";
-    public string Label => IsLocal ? $"{Name} (local)" : $"{Name} · {State.Replace('_', ' ')}";
-    public override string ToString() => Label;
+    public string DisplayName => IsLocal ? "Local" : Name;
+    public override string ToString() => DisplayName;
 }
 
-public sealed record MachineDirectory(IReadOnlyList<HerdMachine> Machines, IReadOnlyList<LiveTerminal> Terminals)
+public sealed record TerminalSpace(string? Id, string DisplayName)
 {
+    public static TerminalSpace Unassigned { get; } = new(null, "Unassigned");
+    internal static TerminalSpace FromLabel(string? id) => id == null ? Unassigned : new(id, id);
+    public override string ToString() => DisplayName;
+}
+
+public sealed class MachineDirectory(IReadOnlyList<HerdMachine> machines, IReadOnlyList<LiveTerminal> terminals)
+{
+    public IReadOnlyList<HerdMachine> Machines { get; } = machines;
+    public IReadOnlyList<LiveTerminal> Terminals { get; } = terminals;
+    internal IReadOnlyDictionary<string, TerminalSpace[]> LayoutSpaces { get; init; } = new Dictionary<string, TerminalSpace[]>();
+    readonly ILookup<string?, LiveTerminal> byMachine = terminals.ToLookup(t => t.MachineAlias, StringComparer.Ordinal);
+    IEnumerable<LiveTerminal> On(HerdMachine machine) => machine.Available ? byMachine[machine.IsLocal ? null : machine.Name] : [];
+
+    public IReadOnlyList<TerminalSpace> SpacesFor(HerdMachine machine)
+    {
+        if (!machine.Available) return [];
+        var saved = LayoutSpaces.GetValueOrDefault(machine.Id) ?? [];
+        var ids = saved.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
+        var unsaved = On(machine).Select(t => t.Space).Where(s => ids.Add(s.Id))
+            .OrderBy(s => s.Id == null).ThenBy(s => s.Id, StringComparer.Ordinal);
+        return [.. saved, .. unsaved];
+    }
+    public IReadOnlyList<LiveTerminal> TerminalsIn(HerdMachine machine, TerminalSpace space) =>
+        On(machine).Where(t => t.Space.Id == space.Id).ToArray();
+
     internal static IReadOnlyList<HerdMachine> ReadMachines(CoreIdentity gateway, JsonElement? listing)
     {
         var machines = new List<HerdMachine> { new(gateway.Id, gateway.Name, "connected", true) };

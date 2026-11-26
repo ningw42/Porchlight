@@ -6,13 +6,18 @@ using Windows.Foundation.Collections;
 
 namespace Porchlight.App;
 
-// Native lifecycle: TermControl supplies its first grid and subscribes TerminalOutput
-// before Start. There is no ConPTY here. A closed view never owns the program.
-internal sealed partial class PaneConnection(CoreSession session, string machineId, string address, Action<bool> ready) : ITerminalConnection
+// One native control owns one attachment, never the gateway or the program.
+internal sealed partial class PaneConnection(CoreSession session, string machineId, string address) : ITerminalConnection
 {
     [ThreadStatic] static PaneConnection? dispatching;
     readonly object gate = new();
+    readonly TaskCompletionSource<bool> ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    readonly TaskCompletionSource<SessionEnd> ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    TerminalAttachment? attachment;
+    bool releasing;
     int rows = 30, cols = 80;
+    internal Task<bool> Ready => ready.Task;
+    internal Task<SessionEnd> Completion => ended.Task;
     public Guid SessionId { get; } = Guid.NewGuid();
     public ConnectionState State { get; private set; } = ConnectionState.NotConnected;
     public event TypedEventHandler<ITerminalConnection, object>? StateChanged;
@@ -21,45 +26,72 @@ internal sealed partial class PaneConnection(CoreSession session, string machine
 
     public async void Start()
     {
+        TerminalAttachment? stream = null;
         try
         {
-            Task<bool> reply;
             lock (gate)
             {
-                if (State != ConnectionState.NotConnected) return;
+                if (releasing || State != ConnectionState.NotConnected) return;
                 State = ConnectionState.Connecting;
-                reply = session.AttachAsync(address, rows, cols, Render, machineId);
+                attachment = stream = session.Attach(address, rows, cols, Render, machineId);
             }
-            if (!await reply) return;
+            bool ok = await stream.Accepted;
             lock (gate)
             {
-                if (State == ConnectionState.Closed) return;
-                State = ConnectionState.Connected;
+                ok &= !releasing;
+                if (ok) State = ConnectionState.Connected;
             }
-            StateChanged?.Invoke(this, null!);
-            ready(true);
+            if (ok) StateChanged?.Invoke(this, null!);
+            ready.TrySetResult(ok);
+            Finish(await stream.Completion);
         }
-        catch { ready(false); await session.DisposeAsync(); }
+        catch (Exception ex)
+        {
+            if (stream != null) await stream.DisposeAsync();
+            Finish(new(EndKind.Disconnected, ex is CoreException ? ex.Message : "Could not open the terminal viewer."));
+        }
     }
 
     void Render(char[] chars)
     {
-        // Pin the scope to THIS instance and stack (does not flow to tasks/UI keys).
-        // A deferred reply has no origin tag and cannot be distinguished from typing.
+        lock (gate) if (releasing) return;
         var previous = dispatching; dispatching = this;
         try { (TerminalOutput ?? throw new InvalidOperationException("Renderer unavailable."))(chars); }
         finally { dispatching = previous; }
     }
-    public void WriteInput(char[] data) => session.Input(Encoding.UTF8.GetBytes(data), ReferenceEquals(dispatching, this));
+    public void WriteInput(char[] data)
+    {
+        lock (gate) if (!releasing) attachment?.Input(Encoding.UTF8.GetBytes(data), ReferenceEquals(dispatching, this));
+    }
     public void Resize(uint r, uint c)
     {
         if (r is 0 or > ushort.MaxValue || c is 0 or > ushort.MaxValue) return;
-        lock (gate) { rows = (int)r; cols = (int)c; session.Resize(rows, cols); }
+        lock (gate) { rows = (int)r; cols = (int)c; if (!releasing) attachment?.Resize(rows, cols); }
     }
-    public void Close()
+    internal void Focus(bool focused) { lock (gate) if (!releasing) attachment?.Focus(focused); }
+
+    internal Task CloseAsync()
     {
-        lock (gate) { if (State == ConnectionState.Closed) return; State = ConnectionState.Closed; }
-        _ = session.DisposeAsync();
-        StateChanged?.Invoke(this, null!);
+        TerminalAttachment? stream;
+        lock (gate)
+        {
+            if (releasing) return ended.Task;
+            releasing = true; stream = attachment;
+        }
+        if (stream == null) Finish(new(EndKind.Detached, "Viewer closed."));
+        else _ = stream.DisposeAsync(); // Start observes Completion after the reader releases Render.
+        return ended.Task;
+    }
+    public void Close() => _ = CloseAsync();
+    void Finish(SessionEnd result)
+    {
+        lock (gate)
+        {
+            if (State == ConnectionState.Closed) return;
+            releasing = true; State = ConnectionState.Closed;
+        }
+        ready.TrySetResult(false);
+        try { StateChanged?.Invoke(this, null!); }
+        finally { ended.TrySetResult(result); }
     }
 }

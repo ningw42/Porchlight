@@ -22,6 +22,23 @@ public class RemoteTests
     }
 
     [TestMethod]
+    public void OnlyHerdRIdShapesAreReservedAsTerminalAddresses()
+    {
+        foreach (var id in new[] { "t1", "t19", "t1b", "t1z", "t65jk" })
+        {
+            Assert.IsTrue(LiveTerminal.IsAddress(id), id);
+            Assert.IsTrue(LiveTerminal.IsAddress("studio/" + id), id);
+            Assert.IsFalse(MachineDirectory.ValidAlias(id), id);
+        }
+        foreach (var alias in new[] { "t0", "tmp", "t1l", "t1a", "t3po" })
+        {
+            Assert.IsFalse(LiveTerminal.IsAddress(alias), alias);
+            Assert.IsTrue(MachineDirectory.ValidAlias(alias), alias);
+        }
+        Assert.IsFalse(LiveTerminal.IsAddress("t1Z"));
+    }
+
+    [TestMethod]
     public async Task MachineListIncludesEmptyAndOffline_ButOnlyAvailableDirectTerminalsAreSelectable()
     {
         using var p = new Peer(); await using var s = await Open(p);
@@ -29,29 +46,28 @@ public class RemoteTests
         Assert.IsFalse(s.Directory.Machines.Single(m => m.Name == "away").Available);
         CollectionAssert.AreEquivalent(new[]{Local,Remote}, s.Terminals.Select(t => t.Address).ToArray());
         foreach (var invalid in new[]{"away/t1","ghost/t1","studio/nested/t4","studio/t99"})
-            Assert.ThrowsExactly<CoreException>(() => s.AttachAsync(invalid,24,80,_=>{}).GetAwaiter().GetResult());
-        Assert.ThrowsExactly<CoreException>(() => s.AttachAsync(Remote,24,80,_=>{},"wrong-core").GetAwaiter().GetResult());
+            Assert.ThrowsExactly<CoreException>(() => s.Attach(invalid,24,80,_=>{},Id));
+        Assert.ThrowsExactly<CoreException>(() => s.Attach(Remote,24,80,_=>{},"wrong-core"));
     }
 
-    [TestMethod, DataRow(Remote,true), DataRow(Local,false), DataRow("another/t74",false)]
-    public async Task RelayedAttachPinsCoreIdAndRequiresFullQualifiedReply(string replyAddress, bool valid)
+    [TestMethod, DataRow(Remote,Id,true), DataRow(Local,Id,false), DataRow("another/t74",Id,false), DataRow(Remote,"replacement",false)]
+    public async Task RelayedAttachPinsCoreIdAndRequiresFullQualifiedReply(string replyAddress, string refreshedId, bool valid)
     {
         using var p = new Peer(); await using var s = await Open(p);
-        // Opening the machine dropdown can race a click on Attach. Replies may be interleaved.
+        // Refreshing the machine directory can race a click on Attach. Replies may be interleaved.
         s.RefreshMachines(); s.RefreshMachines();
-        var attached = s.AttachAsync(Remote,26,89,_=>{},Id);
-        s.Input([65]); await p.Call("machine.list");
-        var q = await p.Call("terminal.attach"); Assert.AreEqual(Id + "/" + Local, q.GetProperty("terminal").GetString());
-        await Machines(p, Machine());
-        await p.Reply(3,new {channel=4,terminal=Peer.Target(replyAddress),automatic_input=false});
-        Assert.AreEqual(valid,await attached);
-        if (!valid) { Assert.AreEqual(EndKind.Disconnected,(await s.Completion).Kind); return; }
+        var lease = s.Attach(Remote,26,89,_=>{},Id);
+        lease.Input([65]); await p.Call("machine.list");
+        var (id,q) = await p.Request("terminal.attach"); Assert.AreEqual(Id + "/" + Local, q.GetProperty("terminal").GetString());
+        await Machines(p, Machine(id:refreshedId)); // even a matching alias can now refer to a different machine
+        await p.Attached(id,address:replyAddress,auto:false);
+        Assert.AreEqual(valid,await lease.Accepted.WaitAsync(TimeSpan.FromSeconds(4)));
+        if (!valid) { Assert.AreEqual(EndKind.Disconnected,(await s.Completion.WaitAsync(TimeSpan.FromSeconds(4))).Kind); await p.ExpectEnd(); return; }
         CollectionAssert.AreEqual(new byte[]{65},await p.Expect(4,0));
-        s.Input([27,91,99], synchronousReply:true); // older remote path: must still send DATA
+        lease.Input([27,91,99], synchronousReply:true); // older remote path: must still send DATA
         CollectionAssert.AreEqual(new byte[]{27,91,99},await p.Expect(4,0));
         await p.Write(4,0,"remote paint"u8.ToArray()); await p.Credit(4,12);
-        var close = s.DisposeAsync(); await p.Expect(4,2); await p.Write(4,2,[]); await close;
-        Assert.AreEqual(EndKind.Detached,(await s.Completion).Kind);
+        await p.Detach(lease,4); await p.Fence();
     }
 
     [TestMethod]
@@ -68,10 +84,14 @@ public class RemoteTests
                 await changed.Task.WaitAsync(TimeSpan.FromSeconds(4));
             } finally { s.CatalogChanged -= Notify; }
         }
+        // A local viewer does not freeze the remote picker or its machine.list subscription.
+        var local = await p.Attach(s, _ => {});
         await Refresh("unreachable"); Assert.AreEqual(Local,s.Terminals.Single().Address);
         await Refresh("connected"); Assert.AreEqual(2,s.Terminals.Count);
         var evt = JsonSerializer.SerializeToUtf8Bytes(new { method="event", @params=new {seq=81, type="removed", terminal=Remote} });
         await p.Write(9,0,[..evt,10]); await p.Credit(9,evt.Length+1);
         Assert.AreEqual(Local,s.Terminals.Single().Address);
+        local.Focus(true); CollectionAssert.AreEqual(new byte[]{1},await p.Expect(4,4));
+        await p.Detach(local,4);
     }
 }

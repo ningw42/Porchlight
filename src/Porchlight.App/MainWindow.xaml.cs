@@ -1,23 +1,25 @@
-using Microsoft.Terminal.Control;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Porchlight.Core;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 
 namespace Porchlight.App;
 
 public sealed partial class MainWindow : Window
 {
+    sealed record Target(string MachineId, string Address);
     readonly CancellationTokenSource lifetime = new();
     LaunchOptions options = new();
+    CoreEndpoint? endpoint;
     CoreSession? session;
-    TermControl? pane;
-    LiveTerminal? viewing;
-    IReadOnlyList<HerdMachine> shownMachines = [];
+    HerdMachine? selectedMachine;
+    TerminalSpace? selectedSpace;
+    Target? suggested;
     IReadOnlyList<LiveTerminal> shownTerminals = [];
     Task? connecting;
-    bool busy, closing, mayClose, active, insidePane, updatingPickers;
+    bool configured, busy, closing, mayClose, active, updatingPickers, userChoseScope;
+    string? viewerNotice;
 
     public MainWindow()
     {
@@ -30,9 +32,12 @@ public sealed partial class MainWindow : Window
             e.Cancel = true;
             if (closing) return;
             closing = true; Controls(); lifetime.Cancel();
+            RequestViewer(null);
             await Task.Yield(); // leave this synchronous cancellable event before calling Close
+            var stop = session?.DisposeAsync().AsTask();
             if (connecting != null) await connecting;
-            if (session != null) { var s = session; await s.DisposeAsync(); Release(s); }
+            await changingViewer;
+            if (stop != null) await stop;
             mayClose = true; Close();
         };
         Closed += (_, _) => lifetime.Dispose();
@@ -43,13 +48,7 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            try { options = LaunchOptions.Parse(args); }
-            catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException or ArgumentException)
-            {
-                ConnectButton.IsEnabled = PipePath.IsEnabled = false;
-                Status.Text = $"Launch settings: {ex.Message} Correct the options and reopen Porchlight.";
-                return;
-            }
+            options = LaunchOptions.Parse(args);
             if (options.Scheme is { } scheme)
             {
                 Title = $"Porchlight · {scheme.Name}";
@@ -57,177 +56,183 @@ public sealed partial class MainWindow : Window
                 PaneHost.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, bg.R, bg.G, bg.B));
             }
             else if (options.ImportedFont) Title = "Porchlight · Windows Terminal font";
-            var ep = options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
-            PipePath.Text = ep.Path;
-            connecting = ConnectTo(ep);
+            configured = true;
+            Connect();
         }
-        catch (Exception ex) { Status.Text = SetupMessage(ex); }
+        catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            Status.Text = $"Launch settings: {ex.Message} Correct the options and reopen Porchlight.";
+        }
     }
     static string SetupMessage(Exception ex) => ex is CoreException or FormatException or ArgumentException or IOException
-        ? ex.Message : "Cannot resolve the core. Enter its full local pipe and choose Connect.";
+        ? ex.Message : "Cannot connect to the configured gateway.";
 
-    void Connect_Click(object sender, RoutedEventArgs e)
+    void Connect()
     {
-        if (busy || closing || session != null) return;
-        try { connecting = ConnectTo(CoreEndpoint.Select(PipePath.Text)); }
-        catch (ArgumentException ex) { Status.Text = ex.Message; }
+        if (!configured || busy || closing || session != null) return;
+        try
+        {
+            endpoint ??= options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
+            connecting = ConnectTo(endpoint);
+        }
+        catch (Exception ex) { Status.Text = SetupMessage(ex) + " Use the sidebar refresh to retry."; Controls(); }
     }
 
     async Task ConnectTo(CoreEndpoint endpoint)
     {
         busy = true; Controls();
-        CoreLabel.Text = $"Endpoint from {endpoint.Source}"; Status.Text = "Connecting to the existing core…";
+        Status.Text = "Connecting to the gateway…";
         try
         {
             var s = await CoreSession.ConnectAsync(endpoint, lifetime.Token);
             if (closing) { await s.DisposeAsync(); return; }
             session = s;
-            var id = s.Identity;
-            CoreLabel.Text = $"Gateway: {id.Name} · HerdR {id.Version} · core {id.Id}";
+            CoreLabel.Text = $"HerdR {s.Identity.Version} · core {s.Identity.Id}";
             s.CatalogChanged += () => DispatcherQueue.TryEnqueue(() => RefreshList(s));
             RefreshList(s, initial: true);
-            _ = WatchEnd(s);
+            _ = WatchGateway(s);
         }
         catch (OperationCanceledException) when (closing) { }
-        catch (Exception ex) { Status.Text = SetupMessage(ex); }
+        catch (Exception ex) { Status.Text = SetupMessage(ex) + " Use the sidebar refresh to retry."; }
         finally { busy = false; Controls(); }
+    }
+
+    void LayoutSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var mode = e.NewSize.Width < 800 ? SplitViewDisplayMode.Overlay : SplitViewDisplayMode.Inline;
+        if (Workspace.DisplayMode == mode) return;
+        Workspace.DisplayMode = mode;
+        if (mode == SplitViewDisplayMode.Overlay) Workspace.IsPaneOpen = false;
     }
 
     void RefreshList(CoreSession s, bool initial = false)
     {
-        if (session != s || viewing != null || closing) return;
+        if (session != s || closing) return;
         var catalog = s.Directory;
-        var prior = MachinePicker.SelectedItem as HerdMachine;
-        string? address = (Picker.SelectedItem as LiveTerminal)?.Address;
-        var machine = catalog.Machines.FirstOrDefault(m => m.Id == prior?.Id);
+        var machine = catalog.Machines.FirstOrDefault(m => m.Id == selectedMachine?.Id);
         if (initial)
         {
-            address = options.Select;
+            var address = options.Select;
             var alias = options.Machine ?? (address?.Contains('/') == true ? address.Split('/')[0] : null);
             machine = catalog.Machines.FirstOrDefault(m => alias == null ? m.IsLocal : m.Name == alias);
+            suggested = machine != null && address != null ? new(machine.Id, address) : null;
+            userChoseScope = false; viewerNotice = null;
             options.Machine = options.Select = null;
         }
+        var spaces = machine == null ? [] : catalog.SpacesFor(machine);
+        var space = spaces.FirstOrDefault(x => selectedSpace != null && x.Id == selectedSpace.Id);
+        var locate = requested ?? suggested;
+        if (locate != null && machine != null && locate.MachineId == machine.Id)
+        {
+            // Never let a reused alias, or a late metadata reply, select a different viewer.
+            var t = catalog.Terminals.FirstOrDefault(t => t.Address == locate.Address && t.MachineAlias == (machine.IsLocal ? null : machine.Name));
+            if (t != null) space = t.Space;
+        }
+        if (!userChoseScope) space ??= spaces.FirstOrDefault();
+        ShowScope(catalog, machine, space);
+    }
+
+    void ShowScope(MachineDirectory catalog, HerdMachine? machine, TerminalSpace? space)
+    {
         updatingPickers = true;
         try
         {
-            if (!shownMachines.SequenceEqual(catalog.Machines))
-                MachinePicker.ItemsSource = shownMachines = catalog.Machines;
-            // XAML selects an object from its actual ItemsSource, not a value-equal
-            // replacement from a later metadata reply.
-            MachinePicker.SelectedItem = shownMachines.FirstOrDefault(m => m.Id == machine?.Id);
-            ShowTerminals(catalog, machine, address);
+            selectedMachine = machine; selectedSpace = space;
+            ScopeLabel.Text = space == null || machine == null ? "No space selected" : $"{machine.DisplayName} / {space.DisplayName}";
+            ShowMachineGroups(catalog);
+            var items = machine != null && space != null ? catalog.TerminalsIn(machine, space) : [];
+            if (!shownTerminals.SequenceEqual(items)) Picker.ItemsSource = shownTerminals = items;
+            // A launch hint or an automatic selection made by the ComboBox isn't user intent.
+            Picker.SelectedItem = requested is { } pick && pick.MachineId == machine?.Id ?
+                shownTerminals.FirstOrDefault(t => t.Address == pick.Address) : null;
         }
         finally { updatingPickers = false; }
         SelectionStatus(); Controls();
     }
-    void ShowTerminals(MachineDirectory catalog, HerdMachine? machine, string? address)
+
+    void ShowMachineGroups(MachineDirectory catalog)
     {
-        var items = catalog.Terminals.Where(t => machine is { Available: true } &&
-            t.MachineAlias == (machine.IsLocal ? null : machine.Name)).ToArray();
-        if (!shownTerminals.SequenceEqual(items)) Picker.ItemsSource = shownTerminals = items;
-        Picker.SelectedItem = shownTerminals.FirstOrDefault(t => t.Address == address);
+        // Reuse each Expander by core ID so directory updates don't reset expansion or focus.
+        var machines = catalog.Machines;
+        var rows = MachineGroups.Children;
+        var existing = rows.Cast<MachineSpaceGroup>().ToDictionary(g => g.Machine.Id);
+        for (int i = 0; i < machines.Count; ++i)
+        {
+            var m = machines[i];
+            if (!existing.TryGetValue(m.Id, out var group))
+            {
+                group = new MachineSpaceGroup();
+                group.SpaceChanged += SpaceChanged;
+                rows.Insert(i, group);
+            }
+            else if (rows[i] != group)
+            {
+                rows.Remove(group);
+                rows.Insert(i, group);
+            }
+            group.Display(m, catalog.SpacesFor(m), m.Id == selectedMachine?.Id ? selectedSpace : null);
+        }
+        while (rows.Count > machines.Count) rows.RemoveAt(rows.Count - 1);
+        EmptyMachines.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
-    void MachineChanged(object sender, SelectionChangedEventArgs e)
+
+    void SpaceChanged(MachineSpaceGroup group)
     {
-        if (updatingPickers || session == null || viewing != null) return;
-        // A machine change clears the terminal, even if both machines have the same tN.
-        ShowTerminals(session.Directory, MachinePicker.SelectedItem as HerdMachine, null);
-        SelectionStatus(); Controls();
+        if (updatingPickers || session == null || busy || closing) return;
+        var catalog = session.Directory;
+        var machine = catalog.Machines.FirstOrDefault(m => m.Id == group.Machine.Id);
+        var space = machine != null && group.SelectedSpace is { } pick ? catalog.SpacesFor(machine).FirstOrDefault(s => s.Id == pick.Id) : null;
+        suggested = null; viewerNotice = null; userChoseScope = true;
+        RequestViewer(null); // release the old pane, not the catalog connection or the program
+        ShowScope(catalog, machine, space);
     }
-    void MachinesOpened(object sender, object e) => session?.RefreshMachines();
-    void SelectionChanged(object sender, SelectionChangedEventArgs e)
-    { if (!updatingPickers) { SelectionStatus(); Controls(); } }
+
+    void RefreshMachines_Click(object sender, RoutedEventArgs e)
+    {
+        if (session == null) Connect(); else session.RefreshMachines();
+    }
+
+    void TerminalSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (updatingPickers || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
+            selectedSpace == null || Picker.SelectedItem is not LiveTerminal terminal) return;
+        suggested = null; viewerNotice = null; userChoseScope = true;
+        RequestViewer(new(machine.Id, terminal.Address));
+    }
+
     void SelectionStatus()
     {
-        if (viewing != null || session == null || Status == null) return;
-        Status.Text = MachinePicker.SelectedItem switch {
-            not HerdMachine => "Select a machine. Open the machine list to refresh its connections.",
-            HerdMachine { Available: false } m => $"{m.Name}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then reopen the machine list.",
-            _ when Picker.SelectedItem is LiveTerminal t => "Selected · " + t.Label,
-            HerdMachine m when Picker.Items.Count == 0 => $"No live terminals on {m.Name}. This viewer does not start one.",
-            _ => "Select a live terminal, then Attach."
-        };
+        if (requested != null || session == null || closing) return;
+        var hint = suggested is { } locate && locate.MachineId == selectedMachine?.Id ?
+            shownTerminals.FirstOrDefault(t => t.Address == locate.Address) : null;
+        Status.Text = viewerNotice ?? (selectedMachine switch {
+            { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
+            _ when selectedSpace == null => "Select a space in the sidebar.",
+            _ when hint != null => $"Choose {hint.Label} in Live terminal to view it.",
+            _ when Picker.Items.Count == 0 => "No live terminals in this space.",
+            _ => "Choose a live terminal to view it."
+        });
     }
     void Controls()
     {
-        if (Attach == null || Disconnect == null) return;
+        if (Picker == null || RefreshMachinesButton == null) return;
         bool idle = !busy && !closing;
-        PipePath.IsEnabled = ConnectButton.IsEnabled = idle && session == null;
-        MachinePicker.IsEnabled = idle && session != null && viewing == null;
-        Picker.IsEnabled = MachinePicker.IsEnabled && MachinePicker.SelectedItem is HerdMachine { Available: true } && Picker.Items.Count > 0;
-        Attach.IsEnabled = Picker.IsEnabled && Picker.SelectedItem is LiveTerminal;
-        Disconnect.IsEnabled = idle && session != null;
-        Disconnect.Content = viewing == null ? "Disconnect" : "Detach";
+        MachineBrowser.IsEnabled = idle && session != null;
+        RefreshMachinesButton.IsEnabled = idle && configured && (session == null || session.SupportsMachineList);
+        var refresh = session == null ? "Retry gateway connection" : "Refresh machines";
+        AutomationProperties.SetName(RefreshMachinesButton, refresh);
+        ToolTipService.SetToolTip(RefreshMachinesButton, refresh);
+        Picker.IsEnabled = MachineBrowser.IsEnabled && selectedMachine is { Available: true } && Picker.Items.Count > 0;
     }
 
-    async void Attach_Click(object sender, RoutedEventArgs e)
-    {
-        if (session is not { } s || MachinePicker.SelectedItem is not HerdMachine { Available: true } machine ||
-            Picker.SelectedItem is not LiveTerminal target || viewing != null || busy || closing) return;
-        viewing = target; Controls(); Status.Text = "Attaching to " + target.Label + "…";
-        try
-        {
-            var font = options.Font;
-            var settings = new TerminalSettings(options.Scheme) {
-                FontFace = font.Face, FontSize = font.Size, FontWeight = new() { Weight = font.Weight },
-                CellHeight = font.CellHeight, CellWidth = font.CellWidth,
-                EnableBuiltinGlyphs = font.BuiltinGlyphs, EnableColorGlyphs = font.ColorGlyphs,
-                FontFeatures = NativeFeatures.Create(font.Features), FontAxes = NativeFeatures.Create(font.Axes)
-            };
-            var conn = new PaneConnection(s, machine.Id, target.Address, ok => DispatcherQueue.TryEnqueue(() => {
-                if (session != s || closing || busy) return;
-                Status.Text = ok ? "Attached · " + target.Label : "Attach failed. Reconnect and select a live terminal.";
-                if (ok) pane?.Focus(FocusState.Programmatic);
-            }));
-            pane = new TermControl(settings, settings, conn) { OwningHwnd = (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this) };
-            pane.KeyBindings(new AppKeyBindings(pane));
-            pane.GotFocus += (_, _) => { insidePane = true; SendFocus(); };
-            pane.LostFocus += (_, _) => { insidePane = false; SendFocus(); };
-            pane.WriteToClipboard += (_, a) => {
-                try { var data = new DataPackage(); data.SetText(a.Plain); Clipboard.SetContent(data); }
-                catch { Status.Text = "Clipboard unavailable."; }
-            };
-            pane.PasteFromClipboard += async (_, a) => {
-                try {
-                    var content = Clipboard.GetContent();
-                    if (content.Contains(StandardDataFormats.Text)) {
-                        var text = await content.GetTextAsync();
-                        if (session == s && !busy && !closing) a.HandleClipboardData(text);
-                    }
-                } catch { Status.Text = "Clipboard unavailable."; }
-            };
-            PaneHost.Child = pane;
-        }
-        catch
-        {
-            await s.DisposeAsync(); Release(s);
-            Status.Text = "Could not host the terminal. Rebuild the x64 app and native feature helper; check Windows App Runtime 1.8 x64.";
-        }
-    }
-    void SendFocus() { if (!closing && !busy && pane != null) session?.Focus(active && insidePane); }
-
-    async Task WatchEnd(CoreSession s)
+    async Task WatchGateway(CoreSession s)
     {
         var end = await s.Completion;
-        if (session != s) return;
-        Release(s);
-        Status.Text = end.Message + " Choose Connect for a fresh list.";
-    }
-    async void Disconnect_Click(object sender, RoutedEventArgs e)
-    {
-        if (session is not { } s || busy || closing) return;
-        busy = true; Controls();
-        await s.DisposeAsync();
-        busy = false; Controls();
-    }
-    void Release(CoreSession s)
-    {
-        if (session != s) return;
-        session = null; viewing = null; insidePane = false;
-        // The reader is joined before unsubscribing/destroying native output callbacks.
-        pane?.Close(); PaneHost.Child = null; pane = null;
-        shownMachines = []; shownTerminals = [];
-        MachinePicker.ItemsSource = null; Picker.ItemsSource = null; CoreLabel.Text = "Not connected";
-        Controls();
+        if (session != s || closing) return;
+        session = null; suggested = null;
+        RequestViewer(null);
+        CoreLabel.Text = "Not connected";
+        ShowScope(new([], []), null, null);
+        Status.Text = end.Message + " Use the sidebar refresh to retry.";
     }
 }

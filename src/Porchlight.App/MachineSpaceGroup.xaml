@@ -1,0 +1,33 @@
+<UserControl x:Class="Porchlight.App.MachineSpaceGroup"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:core="using:Porchlight.Core">
+  <Expander x:Name="Group" IsExpanded="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="4">
+    <Expander.Header>
+      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10" Padding="0,4">
+        <Grid VerticalAlignment="Center">
+          <FontIcon x:Name="OnlineIcon" Glyph="&#xE73E;" FontSize="16" Foreground="{ThemeResource SystemFillColorSuccessBrush}" />
+          <FontIcon x:Name="OfflineIcon" Glyph="&#xE7BA;" FontSize="16" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+        </Grid>
+        <StackPanel Grid.Column="1">
+          <TextBlock x:Name="MachineName" Style="{ThemeResource BodyStrongTextBlockStyle}" TextTrimming="CharacterEllipsis" />
+          <TextBlock x:Name="StateLabel" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+      </Grid>
+    </Expander.Header>
+    <Grid>
+      <TextBlock x:Name="NoSpaces" Text="No live terminals" Margin="12,6" Style="{ThemeResource CaptionTextBlockStyle}"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+      <ListView x:Name="Spaces" SelectionMode="Single" SelectionChanged="SpaceSelectionChanged"
+                ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+        <ListView.ItemTemplate>
+          <DataTemplate x:DataType="core:TerminalSpace">
+            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10" AutomationProperties.Name="{x:Bind DisplayName}">
+              <FontIcon Glyph="&#xE8B7;" FontSize="16" />
+              <TextBlock Grid.Column="1" Text="{x:Bind DisplayName}" TextTrimming="CharacterEllipsis" />
+            </Grid>
+          </DataTemplate>
+        </ListView.ItemTemplate>
+      </ListView>
+    </Grid>
+  </Expander>
+</UserControl>

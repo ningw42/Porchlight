@@ -1,5 +1,3 @@
-using System.Buffers.Binary;
-using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -9,28 +7,38 @@ public sealed record CoreIdentity(string Name, string Id, string Version);
 public enum EndKind { Detached, Exited, Disconnected }
 public sealed record SessionEnd(EndKind Kind, string Message);
 
-/// One existing pipe, one catalog and at most one explicitly requested attach. Reconnect
-/// with a new instance: channel numbers, event sequence and UTF-8 state are connection-local.
+/// One existing pipe and catalog, with at most one viewer lease at a time.
+/// Connection loss, unlike the end of a terminal stream, requires a new session.
 public sealed class CoreSession : IAsyncDisposable
 {
     readonly Stream pipe, reader;
     readonly CancellationTokenSource stop = new();
     readonly TerminalCatalog catalog = new();
     readonly object gate = new();
-    readonly Channel<Frame> writes = Channel.CreateBounded<Frame>(new BoundedChannelOptions(1024) { SingleReader = true });
-    readonly Queue<Frame> beforeReply = new();
+    // A single writer merges connection and lease frames in enqueue order. The signal
+    // carries no data: retiring a lease discards its entire backlog, including credits.
+    readonly Channel<bool> writable = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { SingleReader = true });
+    readonly Outbox control = new();
+    long writeOrder;
     readonly TaskCompletionSource<SessionEnd> ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    TaskCompletionSource<bool>? accepted;
-    Action<char[]>? render;
-    readonly Decoder decoder = Encoding.UTF8.GetDecoder();
-    uint events, attachment;
-    string? selected, fault;
-    bool helloAuto, sendAuto, closing, finished;
-    int queuedBytes;
+    TerminalAttachment? active;
+    Timer? deadline;
+    uint events;
+    string? fault;
+    bool helloAuto, closing, finished;
     const int MachineListId = 4;
     IReadOnlyList<HerdMachine> machines = [];
     MachineDirectory directory = new([], []);
-    bool refreshingMachines;
+    bool refreshingMachines, supportsDocuments, supportsCheckout;
+    // After hello/subscription, odd IDs are unique attach attempts; even IDs >= 6
+    // are reader-owned metadata requests. A late RPC reply can never grant a new lease.
+    int nextAttachId = 3, nextMetadataId = 6;
+    readonly CheckoutNames checkoutNames = new();
+    int NextMetadataId() { int id = nextMetadataId; nextMetadataId = checked(id + 2); return id; }
+    readonly Dictionary<string, SpaceLayout> layouts = new();
+    readonly Dictionary<int, HerdMachine> documentRequests = new();
+    readonly Dictionary<string, int> pendingDocuments = new();
+    readonly HashSet<string> dirtyDocuments = new();
     public bool SupportsMachineList { get; private set; }
     public MachineDirectory Directory => Volatile.Read(ref directory);
     public IReadOnlyList<LiveTerminal> Terminals => Directory.Terminals;
@@ -78,6 +86,8 @@ public sealed class CoreSession : IAsyncDisposable
         Identity = new(core.GetProperty("name").GetString() ?? "unnamed", id, h.GetProperty("version").GetString() ?? "unknown");
         helloAuto = Wire.Contains(h,"features","automatic_input");
         SupportsMachineList = Wire.Contains(h, "methods", "machine.list");
+        supportsDocuments = Wire.Contains(h, "methods", "doc.get");
+        supportsCheckout = supportsDocuments && Wire.Contains(h, "methods", "machine.exec");
         JsonElement? listing = null;
         if (SupportsMachineList)
         {
@@ -106,6 +116,46 @@ public sealed class CoreSession : IAsyncDisposable
             catalog.Consume(e.Bytes);
             if (e.Bytes.Length != 0) await Wire.WriteAsync(pipe, Wire.Credit(e), ct).ConfigureAwait(false);
         }
+        if (supportsDocuments)
+        {
+            catalog.DocumentChanged += alias => {
+                var machine = machines.FirstOrDefault(m => m.Available && (alias is null ? m.IsLocal : !m.IsLocal && m.Name == alias));
+                if (machine != null) RequestDocument(machine);
+            };
+            catalog.DocumentsMissed += RefreshDocuments;
+            RefreshDocuments(); // covers the snapshot and any early events; no reply needed to connect
+        }
+        PublishCatalog();
+    }
+
+    void RefreshDocuments()
+    {
+        foreach (var machine in machines)
+            if (machine.Available) RequestDocument(machine);
+    }
+
+    void RequestDocument(HerdMachine machine)
+    {
+        if (pendingDocuments.ContainsKey(machine.Id)) { dirtyDocuments.Add(machine.Id); return; }
+        lock (gate)
+        {
+            if (closing || finished) return;
+            int id = NextMetadataId();
+            pendingDocuments.Add(machine.Id, id);
+            documentRequests.Add(id, machine);
+            object args = machine.IsLocal ? new { name = "herdr-app" } : new { name = "herdr-app", on = machine.Id };
+            Enqueue(new(0, Kind.Data, Wire.Request(id, "doc.get", args)));
+        }
+    }
+
+    void AcceptDocument(int id, JsonElement reply)
+    {
+        if (!documentRequests.Remove(id, out var machine)) return; // retired route, possibly since reconnected
+        pendingDocuments.Remove(machine.Id);
+        if (dirtyDocuments.Remove(machine.Id)) RequestDocument(machine);
+        if (reply.TryGetProperty("error", out _)) return; // optional capability, including on a relayed peer
+        var result = Wire.Result(reply, id, "doc.get");
+        layouts[machine.Id] = SpaceLayout.Read(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("value", out var value) ? value : default);
         PublishCatalog();
     }
 
@@ -115,7 +165,7 @@ public sealed class CoreSession : IAsyncDisposable
     {
         lock (gate)
         {
-            if (!SupportsMachineList || refreshingMachines || accepted != null || closing || finished) return;
+            if (!SupportsMachineList || refreshingMachines || closing || finished || stop.IsCancellationRequested) return;
             refreshingMachines = true;
             Enqueue(MachineListRequest());
         }
@@ -123,81 +173,86 @@ public sealed class CoreSession : IAsyncDisposable
 
     void PublishCatalog()
     {
-        Volatile.Write(ref directory, catalog.Directory(machines));
+        Volatile.Write(ref directory, catalog.Directory(machines, layouts, supportsCheckout ? checkoutNames.Lookup : null));
+        if (supportsCheckout)
+            lock (gate) if (!closing && !finished) checkoutNames.FinishProjection(NextMetadataId, Enqueue);
         CatalogChanged?.Invoke();
     }
 
-    public Task<bool> AttachAsync(string address, int rows, int cols, Action<char[]> consume, string? expectedMachineId = null)
+    public TerminalAttachment Attach(string address, int rows, int cols, Action<char[]> consume, string expectedMachineId)
     {
-        CheckSize(rows, cols);
+        TerminalAttachment.CheckSize(rows, cols);
         ArgumentNullException.ThrowIfNull(consume);
+        ArgumentNullException.ThrowIfNull(expectedMachineId);
         lock (gate)
         {
-            if (closing || finished || accepted != null) throw new CoreException("Reconnect before attaching another pane.");
+            if (closing || finished || stop.IsCancellationRequested) throw new CoreException("Connection closed. Reconnect and select again.");
+            if (active != null) throw new CoreException("Detach the current viewer before attaching another pane.");
             var current = Directory;
             var target = current.Terminals.FirstOrDefault(t => t.Address == address)
                 ?? throw new CoreException("That program or machine is no longer available. Refresh and select again.");
             var machine = current.Machines.Single(m => target.MachineAlias is null ? m.IsLocal : !m.IsLocal && m.Name == target.MachineAlias);
-            if (expectedMachineId != null && machine.Id != expectedMachineId)
-                throw new CoreException("The selected machine changed. Refresh and select again.");
-            // Route by permanent core ID, not a potentially reassigned alias. The gateway
-            // localizes the attach reply back to alias/tN; require that exact displayed address.
+            if (machine.Id != expectedMachineId) throw new CoreException("The selected machine changed. Refresh and select again.");
+            // Route by permanent core ID. On reply also require the full displayed address
+            // and its original machine, in case a refresh reassigned the alias meanwhile.
             string route = machine.IsLocal ? address : machine.Id + address[address.IndexOf('/')..];
-            selected = address; render = consume;
-            accepted = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            stop.CancelAfter(TimeSpan.FromSeconds(10));
-            Enqueue(new(0, Kind.Data, Wire.Request(3, "terminal.attach", new { terminal = route, rows, cols, history = 2000, observe = false })));
-            return accepted.Task;
+            int id = nextAttachId; nextAttachId = checked(id + 2);
+            active = new(this, id, address, expectedMachineId, consume);
+            ArmDeadline(active, detach: false);
+            Enqueue(new(0, Kind.Data, Wire.Request(id, "terminal.attach", new { terminal = route, rows, cols, history = 2000, observe = false })));
+            return active;
         }
     }
 
-    // Call-site origin only. The transport never classifies the bytes. Take ownership of
-    // a copy now; none of these synchronous control callbacks wait on pipe I/O.
-    public void Input(ReadOnlySpan<byte> bytes, bool synchronousReply = false)
+    internal sealed class Outbox
     {
-        if (bytes.IsEmpty) return;
+        readonly Queue<(long Order, Frame Frame)> frames = new();
+        int bytes;
+        internal long NextOrder => frames.TryPeek(out var head) ? head.Order : long.MaxValue;
+        internal bool Fits(int size) => frames.Count < 1024 && size <= Wire.MaxFrame - bytes;
+        internal void Add(long order, Frame frame) { frames.Enqueue((order, frame)); bytes += frame.Bytes.Length; }
+        internal Frame Take() { var frame = frames.Dequeue().Frame; bytes -= frame.Bytes.Length; return frame; }
+        internal void Clear() { frames.Clear(); bytes = 0; }
+    }
+
+    // All outbox operations run under gate. No control callback waits for pipe I/O.
+    // Check lease identity and capacity before copying caller-owned input.
+    internal void Send(TerminalAttachment lease, Kind kind, ReadOnlySpan<byte> bytes)
+    {
         lock (gate)
         {
-            if (!CanSend) return;
-            if (bytes.Length > Wire.MaxFrame - queuedBytes) { Overflow(); return; }
-            SendStream(synchronousReply ? Kind.AutomaticInput : Kind.Data, bytes.ToArray());
+            if (active != lease || lease.Detaching || closing || finished || stop.IsCancellationRequested) return;
+            if (!lease.Writes.Fits(bytes.Length)) { Overflow(); return; }
+            Queue(lease.Writes, new(0, kind, bytes.ToArray()));
         }
     }
-    static void CheckSize(int rows, int cols)
+
+    void Enqueue(Frame f) => Queue(control, f);
+    void Queue(Outbox outbox, Frame f)
     {
-        if (rows is < 1 or > ushort.MaxValue || cols is < 1 or > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(rows));
-    }
-    public void Resize(int rows, int cols)
-    {
-        CheckSize(rows, cols);
-        byte[] bytes = new byte[4];
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes, (ushort)cols);
-        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(2), (ushort)rows);
-        lock (gate) if (CanSend) SendStream(Kind.Resize, bytes);
-    }
-    public void Focus(bool focused) { lock (gate) if (CanSend) SendStream(Kind.Focus, [focused ? (byte)1 : (byte)0]); }
-    bool CanSend => accepted != null && !closing && !finished && !stop.IsCancellationRequested;
-    void SendStream(Kind kind, byte[] bytes) // under gate
-    {
-        if (attachment != 0) Enqueue(new(attachment, WireKind(kind), bytes));
-        else if (beforeReply.Count >= 1024 || bytes.Length > Wire.MaxFrame - queuedBytes) Overflow();
-        else { beforeReply.Enqueue(new(0, kind, bytes)); queuedBytes += bytes.Length; }
-    }
-    Kind WireKind(Kind k) => k == Kind.AutomaticInput && !sendAuto ? Kind.Data : k;
-    void Enqueue(Frame f) // under gate
-    {
-        if (f.Bytes.Length > Wire.MaxFrame - queuedBytes || !writes.Writer.TryWrite(f)) Overflow();
-        else queuedBytes += f.Bytes.Length;
+        if (!outbox.Fits(f.Bytes.Length)) { Overflow(); return; }
+        outbox.Add(writeOrder++, f);
+        writable.Writer.TryWrite(true);
     }
     void Overflow() { fault = "Output to the core backed up; reconnect rather than losing input silently."; stop.Cancel(); }
 
     async Task WriteLoop(CancellationToken ct)
     {
-        await foreach (var f in writes.Reader.ReadAllAsync(ct).ConfigureAwait(false))
-        {
-            await Wire.WriteAsync(pipe, f, ct).ConfigureAwait(false);
-            lock (gate) queuedBytes -= f.Bytes.Length;
-        }
+        await foreach (var _ in writable.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                Frame f;
+                lock (gate)
+                {
+                    if (active is { Channel: not 0 } a && a.Writes.NextOrder < control.NextOrder) f = a.TakeWrite();
+                    else if (control.NextOrder != long.MaxValue) f = control.Take();
+                    else break;
+                }
+                // One in-flight frame already names its channel; even a subsequent attach
+                // request cannot overtake it on this pipe.
+                await Wire.WriteAsync(pipe, f, ct).ConfigureAwait(false);
+            }
     }
 
     async Task Run()
@@ -214,13 +269,18 @@ public sealed class CoreSession : IAsyncDisposable
             lock (gate) end = closing && fault == null ? new(EndKind.Detached, "Viewer closed; no program exit confirmed.") :
                 new(EndKind.Disconnected, fault ?? (ex is CoreException ? ex.Message : "Connection lost or invalid stream. Check the core and reconnect; no program exit confirmed."));
         }
-        lock (gate) { finished = true; writes.Writer.TryComplete(); stop.Cancel(); }
+        lock (gate) { finished = true; ClearDeadline(); writable.Writer.TryComplete(); stop.Cancel(); }
         // Async pipe operations observe stop. Join first; disposing a duplex BufferedStream
         // after closing its underlying PipeStream can throw while forwarding Flush.
         try { await Task.WhenAll(r, w).ConfigureAwait(false); } catch { /* end above is authoritative */ }
-        DisposePipe(); stop.Dispose();
-        lock (gate) { render = null; beforeReply.Clear(); accepted?.TrySetResult(false); }
-        ended.TrySetResult(end);
+        DisposePipe();
+        lock (gate)
+        {
+            control.Clear();
+            if (active != null) FinishAttachment(active, end);
+            stop.Dispose();
+            ended.TrySetResult(end);
+        }
     }
 
     void DisposePipe()
@@ -234,79 +294,142 @@ public sealed class CoreSession : IAsyncDisposable
     {
         while (true)
         {
+            ct.ThrowIfCancellationRequested();
             var f = await Wire.ReadAsync(reader, ct).ConfigureAwait(false);
             if (f.Channel == 0 && f.Kind == Kind.Data)
             {
                 var reply = Wire.Parse(f.Bytes);
-                if (reply.GetProperty("id").GetInt32() == MachineListId) AcceptMachines(reply);
-                else AcceptAttach(reply);
+                int id = reply.GetProperty("id").GetInt32();
+                switch (id)
+                {
+                    case >= 3 when (id & 1) != 0: AcceptAttach(id, reply); break;
+                    case MachineListId: AcceptMachines(reply); break;
+                    case >= 6 when id < nextMetadataId:
+                        if (checkoutNames.Receive(id, reply)) PublishCatalog();
+                        else AcceptDocument(id, reply);
+                        break;
+                    default: throw new InvalidDataException("Unexpected RPC response.");
+                }
                 continue;
             }
             if (f.Channel == events && f.Kind == Kind.Data)
             {
                 if (catalog.Consume(f.Bytes)) PublishCatalog();
+                lock (gate) if (!closing && f.Bytes.Length != 0) Enqueue(Wire.Credit(f));
+                continue;
             }
-            else if (attachment != 0 && f.Channel == attachment)
+
+            TerminalAttachment lease;
+            bool detaching;
+            lock (gate)
             {
-                if (f.Kind == Kind.Close) return Closed(f.Bytes);
-                if (f.Kind != Kind.Data) throw new InvalidDataException();
-                Decode(f.Bytes, flush: false); // synchronous consumption by renderer, NOT delivery to a UI queue
+                if (active is not { Channel: not 0 } a || f.Channel != a.Channel) throw new InvalidDataException("Unexpected stream channel.");
+                lease = a; detaching = a.Detaching;
+                if (f.Kind == Kind.Close) { a.Detaching = true; a.Writes.Clear(); }
             }
-            else throw new InvalidDataException();
-            lock (gate) if (!closing && f.Bytes.Length != 0) Enqueue(Wire.Credit(f));
+            if (f.Kind == Kind.Close)
+            {
+                var end = lease.Closed(f.Bytes, detaching);
+                lock (gate)
+                {
+                    FinishAttachment(lease, end);
+                    if (closing) return new(EndKind.Detached, "Detached.");
+                }
+                continue;
+            }
+            if (f.Kind != Kind.Data) throw new InvalidDataException();
+            if (detaching) continue; // terminal output can cross our CLOSE on the wire
+            lease.Decode(f.Bytes, flush: false); // synchronous consumption, never under gate
+            lock (gate) if (!lease.Detaching && !finished && f.Bytes.Length != 0) Queue(lease.Writes, Wire.Credit(f));
         }
     }
 
     void AcceptMachines(JsonElement reply)
     {
+        var previous = machines;
         lock (gate)
         {
             if (!refreshingMachines) throw new InvalidDataException();
             machines = MachineDirectory.ReadMachines(Identity, Wire.Result(reply, MachineListId, "machine.list"));
             refreshingMachines = false;
         }
+        if (supportsDocuments)
+        {
+            var connected = machines.Where(m => m.Available).ToHashSet();
+            foreach (var old in previous.Where(m => m.Available && !connected.Contains(m)))
+            {
+                layouts.Remove(old.Id);
+                dirtyDocuments.Remove(old.Id);
+                if (pendingDocuments.Remove(old.Id, out int id)) documentRequests.Remove(id);
+            }
+            checkoutNames.Refresh();
+            RefreshDocuments();
+        }
         PublishCatalog();
     }
 
-    void AcceptAttach(JsonElement reply)
+    void AcceptAttach(int id, JsonElement reply)
     {
         lock (gate)
         {
-            if (accepted == null || attachment != 0) throw new InvalidDataException();
-            var a = Wire.Result(reply, 3, "terminal.attach");
-            var ch = Wire.Channel(a);
-            if (ch == events || a.GetProperty("terminal").GetProperty("address").GetString() != selected)
-                throw new CoreException("Unexpected attach channel or terminal identity. Reconnect and reselect.");
-            if (closing) throw new OperationCanceledException();
-            attachment = ch; sendAuto = helloAuto && Wire.Flag(a,"automatic_input");
-            stop.CancelAfter(Timeout.Infinite);
-            while (beforeReply.TryDequeue(out var pending))
+            if (active is not { Channel: 0 } lease || lease.RequestId != id || reply.GetProperty("jsonrpc").GetString() != "2.0")
+                throw new InvalidDataException("Unexpected attach reply.");
+            if (closing || stop.IsCancellationRequested) throw new OperationCanceledException();
+            if (reply.TryGetProperty("error", out var error))
             {
-                queuedBytes -= pending.Bytes.Length;
-                Enqueue(new(ch, WireKind(pending.Kind), pending.Bytes));
+                if (reply.TryGetProperty("result", out _) || error.ValueKind != JsonValueKind.Object ||
+                    !error.GetProperty("code").TryGetInt32(out _) || error.GetProperty("message").ValueKind != JsonValueKind.String)
+                    throw new InvalidDataException("Invalid attach error.");
+                FinishAttachment(lease, new(EndKind.Detached, "Core refused the attachment. Refresh and select a live program."));
+                return;
             }
-            accepted.TrySetResult(true);
+            var result = Wire.Result(reply, id, "terminal.attach");
+            var ch = Wire.Channel(result);
+            string address = lease.Address;
+            int slash = address.IndexOf('/');
+            if (ch == events || result.GetProperty("terminal").GetProperty("address").GetString() != address ||
+                !machines.Any(m => m.Id == lease.MachineId && m.Available && (slash < 0 ? m.IsLocal : !m.IsLocal && m.Name == address[..slash])))
+                throw new CoreException("Unexpected attach channel or terminal identity. Reconnect and reselect.");
+            lease.Accept(ch, helloAuto && Wire.Flag(result, "automatic_input"));
+            if (lease.Detaching) Queue(lease.Writes, new(ch, Kind.Close, [])); // still on its original detach deadline
+            else { ClearDeadline(); writable.Writer.TryWrite(true); }
         }
     }
 
-    void Decode(byte[] bytes, bool flush)
+    // Only the reader (or Run after joining it) can release the slot and its renderer.
+    void FinishAttachment(TerminalAttachment lease, SessionEnd end)
     {
-        var chars = new char[decoder.GetCharCount(bytes, flush)];
-        decoder.GetChars(bytes, chars, flush);
-        if (chars.Length > 0) render!(chars);
+        ClearDeadline(); active = null; lease.Finish(end);
     }
-    SessionEnd Closed(byte[] bytes)
+
+    void ClearDeadline() { deadline?.Dispose(); deadline = null; }
+    void ArmDeadline(TerminalAttachment lease, bool detach)
     {
-        if (bytes.Length == 0)
-        {
-            lock (gate) if (closing) return new(EndKind.Detached, "Detached.");
-            throw new InvalidDataException("Unsolicited close.");
-        }
-        var msg = Wire.Parse(bytes);
-        if (msg.GetProperty("reason").GetString() is not ("exited" or "killed")) throw new InvalidDataException();
-        Decode([], flush: true);
-        string code = msg.TryGetProperty("exit_code", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var n) ? $" (code {n})" : "";
-        return new(EndKind.Exited, "Program " + msg.GetProperty("reason").GetString() + code + ".");
+        ClearDeadline();
+        deadline = new Timer(_ => {
+            lock (gate)
+            {
+                // Dispose does not retract a timer callback already waiting for gate.
+                if (active != lease || finished || lease.Detaching != detach || !detach && lease.Channel != 0 || stop.IsCancellationRequested) return;
+                if (!closing) fault = detach ? "Detach was not confirmed. Reconnect; no program exit confirmed." : "Core did not answer terminal.attach. Reconnect and reselect.";
+                stop.Cancel(); // uncertain ownership: never recycle this pipe
+            }
+        }, null, TimeSpan.FromSeconds(detach ? 2 : 10), Timeout.InfiniteTimeSpan);
+    }
+
+    void BeginDetach(TerminalAttachment lease)
+    {
+        if (lease.Detaching) return;
+        lease.Detaching = true;
+        ArmDeadline(lease, detach: true);
+        if (lease.Channel == 0) lease.Writes.Clear(); // do not send any pre-grant input
+        else Queue(lease.Writes, new(lease.Channel, Kind.Close, []));
+    }
+
+    internal ValueTask Detach(TerminalAttachment lease)
+    {
+        lock (gate) if (active == lease && !finished && !stop.IsCancellationRequested) BeginDetach(lease);
+        return new(lease.Completion);
     }
 
     public ValueTask DisposeAsync()
@@ -316,8 +439,8 @@ public sealed class CoreSession : IAsyncDisposable
             if (!closing && !finished)
             {
                 closing = true;
-                if (attachment == 0) stop.Cancel(); // even if attach RPC is in flight, pipe loss releases only the viewer
-                else { Enqueue(new(attachment, Kind.Close, [])); stop.CancelAfter(TimeSpan.FromSeconds(2)); }
+                if (active is { Channel: not 0 } lease) BeginDetach(lease);
+                else stop.Cancel(); // window shutdown need not wait for an outstanding attach RPC
             }
         }
         return new(Completion);
