@@ -1,5 +1,8 @@
 using Microsoft.Terminal.Control;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Porchlight.Core;
 using Windows.ApplicationModel.DataTransfer;
 
@@ -22,13 +25,14 @@ public sealed partial class MainWindow
         requested = target;
         long version = ++revision;
         if (connection != null) _ = connection.CloseAsync();
-        if (target != null) Status.Text = $"Attaching to {target.Address}…";
+        AutomationProperties.SetName(PaneHost, "");
+        if (target != null) ShowStatus($"Attaching to {target.Address}…");
         changingViewer = ChangeViewer(changingViewer, version, session, target);
     }
 
     async Task ChangeViewer(Task previous, long version, CoreSession? gateway, Target? target)
     {
-        await Task.Yield(); // leave ComboBox selection dispatch before replacing native content
+        await Task.Yield(); // leave tab selection dispatch before replacing native content
         await previous;
         if (version != revision) return;
         try
@@ -69,7 +73,7 @@ public sealed partial class MainWindow
         control.WriteToClipboard += (_, a) => {
             if (!Current()) return;
             try { var data = new DataPackage(); data.SetText(a.Plain); Clipboard.SetContent(data); }
-            catch { Status.Text = "Clipboard unavailable."; }
+            catch { ShowStatus("Clipboard unavailable."); }
         };
         control.PasteFromClipboard += async (_, a) => {
             if (!Current()) return;
@@ -79,7 +83,7 @@ public sealed partial class MainWindow
                     var text = await content.GetTextAsync();
                     if (Current()) a.HandleClipboardData(text);
                 }
-            } catch { if (Current()) Status.Text = "Clipboard unavailable."; }
+            } catch { if (Current()) ShowStatus("Clipboard unavailable."); }
         };
         PaneHost.Child = control;
         _ = WatchPane();
@@ -88,8 +92,10 @@ public sealed partial class MainWindow
         {
             if (await bridge.Ready && Current())
             {
-                Status.Text = "Attached · " + label;
-                if (!Picker.IsDropDownOpen) control.Focus(FocusState.Programmatic);
+                AutomationProperties.SetName(PaneHost, label);
+                ShowStatus();
+                if (active && FocusManager.GetFocusedElement(control.XamlRoot) is null or TabViewItem)
+                    control.Focus(FocusState.Programmatic);
             }
             var end = await bridge.Completion;
             if (!Current()) return;
@@ -101,9 +107,9 @@ public sealed partial class MainWindow
     void ClearTerminalSelection(string notice)
     {
         viewerNotice = notice;
-        updatingPickers = true;
-        try { Picker.SelectedItem = null; }
-        finally { updatingPickers = false; }
+        updatingSelection = true;
+        try { TerminalTabs.SelectedItem = null; }
+        finally { updatingSelection = false; }
         SelectionStatus(); Controls();
     }
 

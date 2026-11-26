@@ -22,7 +22,7 @@ internal sealed class LaunchOptions
             {
                 case "--pipe": options.Pipe = pair[1]; break;
                 case "--machine": options.Machine = pair[1]; break;
-                case "--select": options.Select = pair[1]; break; // locate its space; only a committed dropdown choice attaches
+                case "--select": options.Select = pair[1]; break; // locate its space; only selecting a terminal tab attaches
                 case "--wt-font": fontPath = pair[1]; break;
                 case "--wt-scheme": schemeName = pair[1]; break;
                 case "--face": face = pair[1]; break;

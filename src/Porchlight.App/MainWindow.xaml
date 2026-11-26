@@ -1,17 +1,74 @@
 <Window x:Class="Porchlight.App.MainWindow" Title="Porchlight"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:core="using:Porchlight.Core">
+  <Window.SystemBackdrop>
+    <MicaBackdrop Kind="BaseAlt" />
+  </Window.SystemBackdrop>
   <Grid SizeChanged="LayoutSizeChanged" RowDefinitions="Auto,*">
-    <Grid Padding="8,4" ColumnDefinitions="Auto,*" ColumnSpacing="12">
-      <ToggleButton x:Name="SidebarToggle" IsChecked="True"
-                    AutomationProperties.Name="Machine and space sidebar" ToolTipService.ToolTip="Show or hide the sidebar">
-        <FontIcon Glyph="&#xE700;" FontSize="16" />
-      </ToggleButton>
-      <TextBlock x:Name="ScopeLabel" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                 Style="{ThemeResource BodyStrongTextBlockStyle}" Text="No space selected" />
+    <Grid x:Name="AppTitleBar" ColumnDefinitions="Auto,*,Auto" AutomationProperties.Name="Window title bar">
+      <Grid Width="{x:Bind SidebarHeaderWidth(Workspace.IsPaneOpen, Workspace.OpenPaneLength), Mode=OneWay}" ColumnDefinitions="Auto,*">
+        <ToggleButton x:Name="SidebarToggle" IsChecked="True" Width="28" Height="28" Margin="4,8,0,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top"
+                      HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Background="{ThemeResource TabViewButtonBackground}"
+                      BorderThickness="{ThemeResource TabViewButtonBorderThickness}" BorderBrush="{ThemeResource TabViewButtonBorderBrush}"
+                      AutomationProperties.Name="Machine and space sidebar" ToolTipService.ToolTip="Show or hide the sidebar">
+          <ToggleButton.Resources>
+            <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="TabViewButtonBackgroundPointerOver" />
+            <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TabViewButtonForegroundPointerOver" />
+            <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="TabViewButtonBackgroundPressed" />
+            <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="TabViewButtonForegroundPressed" />
+            <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TabViewButtonBackground" />
+            <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TabViewButtonForeground" />
+            <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TabViewButtonBackgroundPointerOver" />
+            <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TabViewButtonForegroundPointerOver" />
+            <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TabViewButtonBackgroundPressed" />
+            <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TabViewButtonForegroundPressed" />
+          </ToggleButton.Resources>
+          <FontIcon Glyph="&#xE700;" FontSize="16" />
+        </ToggleButton>
+        <Grid x:Name="SidebarDragArea" Grid.Column="1" />
+      </Grid>
+      <TabView x:Name="TerminalTabs" Grid.Column="1" AutomationProperties.Name="Live terminals in this space"
+               SelectedIndex="-1" SelectionChanged="TerminalSelected" TabWidthMode="SizeToContent"
+               IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" AllowDropTabs="False">
+        <TabView.TabItemTemplate>
+          <DataTemplate x:DataType="core:LiveTerminal">
+            <TabViewItem Header="{x:Bind Label}" IsClosable="False" AutomationProperties.Name="{x:Bind Label}"
+                         ToolTipService.ToolTip="{x:Bind Label}" />
+          </DataTemplate>
+        </TabView.TabItemTemplate>
+        <TabView.TabStripFooter>
+          <Grid x:Name="TabDragArea" MinWidth="48" MinHeight="40" Background="Transparent" />
+        </TabView.TabStripFooter>
+      </TabView>
+      <StackPanel x:Name="CaptionButtons" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed">
+        <StackPanel.Resources>
+          <Style x:Key="CaptionButtonStyle" TargetType="Button" BasedOn="{StaticResource SubtleButtonStyle}">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="VerticalAlignment" Value="Stretch" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="CornerRadius" Value="0" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FontFamily" Value="{ThemeResource SymbolThemeFontFamily}" />
+            <Setter Property="FontSize" Value="10" />
+          </Style>
+        </StackPanel.Resources>
+        <Button x:Name="MinimizeButton" Style="{StaticResource CaptionButtonStyle}" Content="&#xE921;" Click="CaptionButtonClicked"
+                AutomationProperties.AutomationId="Minimize" AutomationProperties.Name="Minimize" ToolTipService.ToolTip="Minimize" />
+        <Button x:Name="MaximizeButton" Style="{StaticResource CaptionButtonStyle}" Content="&#xE922;" Click="CaptionButtonClicked"
+                AutomationProperties.AutomationId="Maximize" AutomationProperties.Name="Maximize" ToolTipService.ToolTip="Maximize" />
+        <Button x:Name="CloseButton" Style="{StaticResource CaptionButtonStyle}" Content="&#xE8BB;" Click="CaptionButtonClicked"
+                AutomationProperties.AutomationId="Close" AutomationProperties.Name="Close" ToolTipService.ToolTip="Close">
+          <Button.Resources>
+            <StaticResource x:Key="SubtleButtonBackgroundPointerOver" ResourceKey="CloseButtonBackgroundPointerOver" />
+            <StaticResource x:Key="SubtleButtonForegroundPointerOver" ResourceKey="CloseButtonStrokePointerOver" />
+            <StaticResource x:Key="SubtleButtonBackgroundPressed" ResourceKey="CloseButtonBackgroundPressed" />
+            <StaticResource x:Key="SubtleButtonForegroundPressed" ResourceKey="CloseButtonStrokePressed" />
+          </Button.Resources>
+        </Button>
+      </StackPanel>
     </Grid>
 
-    <SplitView x:Name="Workspace" Grid.Row="1" DisplayMode="Inline" OpenPaneLength="280"
+    <SplitView x:Name="Workspace" Grid.Row="1" DisplayMode="Inline"
                IsPaneOpen="{Binding IsChecked, ElementName=SidebarToggle, Mode=TwoWay}"
                PaneBackground="{ThemeResource LayerFillColorDefaultBrush}">
       <SplitView.Pane>
@@ -33,11 +90,9 @@
         </Grid>
       </SplitView.Pane>
 
-      <Grid Padding="12" RowSpacing="8" RowDefinitions="Auto,Auto,*">
-        <ComboBox x:Name="Picker" Header="Live terminal" HorizontalAlignment="Stretch" PlaceholderText="Select a terminal to view"
-                  SelectionChangedTrigger="Committed" SelectionChanged="TerminalSelected" />
-        <TextBlock x:Name="Status" Grid.Row="1" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-        <Border x:Name="PaneHost" Grid.Row="2" Background="#282c34" CornerRadius="4" />
+      <Grid Padding="12" RowDefinitions="Auto,*" Background="{ThemeResource LayerFillColorDefaultBrush}">
+        <TextBlock x:Name="Status" Visibility="Collapsed" Margin="0,0,0,8" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+        <Border x:Name="PaneHost" Grid.Row="1" Background="#282c34" CornerRadius="4" />
       </Grid>
     </SplitView>
   </Grid>

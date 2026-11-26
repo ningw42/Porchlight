@@ -18,12 +18,13 @@ public sealed partial class MainWindow : Window
     Target? suggested;
     IReadOnlyList<LiveTerminal> shownTerminals = [];
     Task? connecting;
-    bool configured, busy, closing, mayClose, active, updatingPickers, userChoseScope;
+    bool configured, busy, closing, mayClose, active, updatingSelection, userChoseScope;
     string? viewerNotice;
 
     public MainWindow()
     {
         InitializeComponent();
+        ConfigureTitleBar();
         AppWindow.Resize(new SizeInt32(1440, 960));
         Activated += (_, e) => { active = e.WindowActivationState != WindowActivationState.Deactivated; SendFocus(); };
         AppWindow.Closing += async (_, e) =>
@@ -61,9 +62,15 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException or ArgumentException)
         {
-            Status.Text = $"Launch settings: {ex.Message} Correct the options and reopen Porchlight.";
+            ShowStatus($"Launch settings: {ex.Message} Correct the options and reopen Porchlight.");
         }
     }
+    void ShowStatus(string message = "")
+    {
+        Status.Text = message;
+        Status.Visibility = message.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     static string SetupMessage(Exception ex) => ex is CoreException or FormatException or ArgumentException or IOException
         ? ex.Message : "Cannot connect to the configured gateway.";
 
@@ -75,13 +82,13 @@ public sealed partial class MainWindow : Window
             endpoint ??= options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
             connecting = ConnectTo(endpoint);
         }
-        catch (Exception ex) { Status.Text = SetupMessage(ex) + " Use the sidebar refresh to retry."; Controls(); }
+        catch (Exception ex) { ShowStatus(SetupMessage(ex) + " Use the sidebar refresh to retry."); Controls(); }
     }
 
     async Task ConnectTo(CoreEndpoint endpoint)
     {
         busy = true; Controls();
-        Status.Text = "Connecting to the gateway…";
+        ShowStatus("Connecting to the gateway…");
         try
         {
             var s = await CoreSession.ConnectAsync(endpoint, lifetime.Token);
@@ -93,16 +100,18 @@ public sealed partial class MainWindow : Window
             _ = WatchGateway(s);
         }
         catch (OperationCanceledException) when (closing) { }
-        catch (Exception ex) { Status.Text = SetupMessage(ex) + " Use the sidebar refresh to retry."; }
+        catch (Exception ex) { ShowStatus(SetupMessage(ex) + " Use the sidebar refresh to retry."); }
         finally { busy = false; Controls(); }
     }
 
+    double SidebarHeaderWidth(bool isOpen, double paneWidth) => isOpen ? paneWidth : double.NaN;
+
     void LayoutSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        var mode = e.NewSize.Width < 800 ? SplitViewDisplayMode.Overlay : SplitViewDisplayMode.Inline;
-        if (Workspace.DisplayMode == mode) return;
-        Workspace.DisplayMode = mode;
-        if (mode == SplitViewDisplayMode.Overlay) Workspace.IsPaneOpen = false;
+        // Even in a narrow window an open pane sits beside its workspace, never over the tabs.
+        Workspace.OpenPaneLength = Math.Min(280, e.NewSize.Width / 2);
+        if (e.NewSize.Width < 800 && (e.PreviousSize.Width == 0 || e.PreviousSize.Width >= 800))
+            Workspace.IsPaneOpen = false;
     }
 
     void RefreshList(CoreSession s, bool initial = false)
@@ -134,19 +143,18 @@ public sealed partial class MainWindow : Window
 
     void ShowScope(MachineDirectory catalog, HerdMachine? machine, TerminalSpace? space)
     {
-        updatingPickers = true;
+        updatingSelection = true;
         try
         {
             selectedMachine = machine; selectedSpace = space;
-            ScopeLabel.Text = space == null || machine == null ? "No space selected" : $"{machine.DisplayName} / {space.DisplayName}";
             ShowMachineGroups(catalog);
             var items = machine != null && space != null ? catalog.TerminalsIn(machine, space) : [];
-            if (!shownTerminals.SequenceEqual(items)) Picker.ItemsSource = shownTerminals = items;
-            // A launch hint or an automatic selection made by the ComboBox isn't user intent.
-            Picker.SelectedItem = requested is { } pick && pick.MachineId == machine?.Id ?
+            if (!shownTerminals.SequenceEqual(items)) TerminalTabs.TabItemsSource = shownTerminals = items;
+            // Only an explicit tab selection attaches, never a launch hint or a catalog refresh.
+            TerminalTabs.SelectedItem = requested is { } pick && pick.MachineId == machine?.Id ?
                 shownTerminals.FirstOrDefault(t => t.Address == pick.Address) : null;
         }
-        finally { updatingPickers = false; }
+        finally { updatingSelection = false; }
         SelectionStatus(); Controls();
     }
 
@@ -178,7 +186,7 @@ public sealed partial class MainWindow : Window
 
     void SpaceChanged(MachineSpaceGroup group)
     {
-        if (updatingPickers || session == null || busy || closing) return;
+        if (updatingSelection || session == null || busy || closing) return;
         var catalog = session.Directory;
         var machine = catalog.Machines.FirstOrDefault(m => m.Id == group.Machine.Id);
         var space = machine != null && group.SelectedSpace is { } pick ? catalog.SpacesFor(machine).FirstOrDefault(s => s.Id == pick.Id) : null;
@@ -194,8 +202,8 @@ public sealed partial class MainWindow : Window
 
     void TerminalSelected(object sender, SelectionChangedEventArgs e)
     {
-        if (updatingPickers || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
-            selectedSpace == null || Picker.SelectedItem is not LiveTerminal terminal) return;
+        if (updatingSelection || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
+            selectedSpace == null || TerminalTabs.SelectedItem is not LiveTerminal terminal) return;
         suggested = null; viewerNotice = null; userChoseScope = true;
         RequestViewer(new(machine.Id, terminal.Address));
     }
@@ -203,26 +211,23 @@ public sealed partial class MainWindow : Window
     void SelectionStatus()
     {
         if (requested != null || session == null || closing) return;
-        var hint = suggested is { } locate && locate.MachineId == selectedMachine?.Id ?
-            shownTerminals.FirstOrDefault(t => t.Address == locate.Address) : null;
-        Status.Text = viewerNotice ?? (selectedMachine switch {
+        ShowStatus(viewerNotice ?? (selectedMachine switch {
             { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
             _ when selectedSpace == null => "Select a space in the sidebar.",
-            _ when hint != null => $"Choose {hint.Label} in Live terminal to view it.",
-            _ when Picker.Items.Count == 0 => "No live terminals in this space.",
-            _ => "Choose a live terminal to view it."
-        });
+            _ when shownTerminals.Count == 0 => "No live terminals in this space.",
+            _ => ""
+        }));
     }
     void Controls()
     {
-        if (Picker == null || RefreshMachinesButton == null) return;
+        if (TerminalTabs == null || RefreshMachinesButton == null) return;
         bool idle = !busy && !closing;
         MachineBrowser.IsEnabled = idle && session != null;
         RefreshMachinesButton.IsEnabled = idle && configured && (session == null || session.SupportsMachineList);
         var refresh = session == null ? "Retry gateway connection" : "Refresh machines";
         AutomationProperties.SetName(RefreshMachinesButton, refresh);
         ToolTipService.SetToolTip(RefreshMachinesButton, refresh);
-        Picker.IsEnabled = MachineBrowser.IsEnabled && selectedMachine is { Available: true } && Picker.Items.Count > 0;
+        TerminalTabs.IsEnabled = MachineBrowser.IsEnabled && selectedMachine is { Available: true };
     }
 
     async Task WatchGateway(CoreSession s)
@@ -233,6 +238,6 @@ public sealed partial class MainWindow : Window
         RequestViewer(null);
         CoreLabel.Text = "Not connected";
         ShowScope(new([], []), null, null);
-        Status.Text = end.Message + " Use the sidebar refresh to retry.";
+        ShowStatus(end.Message + " Use the sidebar refresh to retry.");
     }
 }

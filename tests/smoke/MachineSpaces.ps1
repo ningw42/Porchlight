@@ -7,6 +7,17 @@ param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference = 'Stop'
 $exePath = (Get-Item -LiteralPath $Exe).FullName
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+# Query the fixture HWND's non-client hit test; don't move the mouse or send clicks to the desktop.
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class PorchlightChrome {
+    [DllImport("user32")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32")] static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+    public static int Hit(IntPtr hwnd, int x, int y) =>
+        (int)SendMessage(hwnd, 0x0084, IntPtr.Zero, (IntPtr)((x & 0xffff) | (y << 16)));
+}
+'@
 
 . "$PSScriptRoot/Find-TerminalItem.ps1"
 
@@ -83,6 +94,12 @@ $serve = {
                 $machines = @(@{ id='core-studio'; name='studio'; state='connected' })
                 if ($state.refresh) { $machines += @{ id='core-extra'; name='extra'; state='connected' } }
                 $result = @{ machines=$machines }
+                if ($active) {
+                    # Insert a tab before the selected one; its address, not its index, must stay selected.
+                    $newTab = @{ address='t73'; name='new sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
+                    $event = @{ method='event'; params=@{ seq=81; type='created'; terminal='t73'; data=$newTab } } | ConvertTo-Json -Depth 8 -Compress
+                    WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
+                }
             }
             'events.subscribe' {
                 if ($subscribed) { throw 'Viewer subscribed a second time' }; $subscribed = $true
@@ -95,7 +112,7 @@ $serve = {
                 $address = $request.params.terminal
                 if ($active) { throw "Attach to $address before empty CLOSE acknowledgement on channel $active" }
                 if (!$subscribed -or !$state.nextTerminal -or $address -cne $state.nextTerminal -or !$targets.ContainsKey($address)) {
-                    throw "Unexpected terminal.attach: $address (authorized dropdown commit: '$($state.nextTerminal)')"
+                    throw "Unexpected terminal.attach: $address (authorized tab selection: '$($state.nextTerminal)')"
                 }
                 $active = $attachChannels[$state.attaches]; $state.attaches++; $state.nextTerminal = $null
                 $result = @{ channel=$active; terminal=$targets[$address] }
@@ -172,13 +189,63 @@ function SpacePattern($machine, $space) {
 function IsExpanded($machine) {
     (Pattern "MachineGroup-$machine" ([ExpandCollapsePattern]::Pattern)).Current.ExpandCollapseState -eq 'Expanded'
 }
+function StatusHidden {
+    $status = FindId Status
+    !$status -or $status.Current.IsOffscreen
+}
+function TabsInCaption($label) {
+    $strip = FindId TerminalTabs
+    $tabs = $strip.Current.BoundingRectangle
+    $minimize = (FindId Minimize).Current.BoundingRectangle
+    $button = (FindId SidebarToggle).Current.BoundingRectangle
+    if (!$tabs -or $tabs.IsEmpty -or !$minimize -or $minimize.IsEmpty -or !$button -or $button.IsEmpty) { return $false }
+    $scale = [PorchlightChrome]::GetDpiForWindow($hwnd) / 96.0
+    $left = (FindId AppTitleBar).Current.BoundingRectangle.Left
+    if ([Math]::Abs($button.Left - $left) -gt 8 * $scale -or $tabs.Left -lt $button.Right - 1) { return $false }
+    if ($toggle.Current.ToggleState -eq 'Off' -and $tabs.Left -gt $button.Right + 8 * $scale) { return $false }
+    if ([PorchlightChrome]::Hit($hwnd, $button.Left + $button.Width / 2, $button.Top + $button.Height / 2) -ne 1) { return $false }
+    $y = [int]($minimize.Top + $minimize.Height / 2)
+    if ($tabs.Top -ge $y -or $tabs.Bottom -le $y -or $tabs.Right -gt $minimize.Left + 1) { return $false }
+    if ([PorchlightChrome]::Hit($hwnd, $minimize.Left + $minimize.Width / 2, $y) -ne 8) { return $false } # HTMINBUTTON
+    if ($toggle.Current.ToggleState -eq 'On' -and
+        [PorchlightChrome]::Hit($hwnd, ($button.Right + $tabs.Left) / 2, $y) -ne 2) { return $false } # HTCAPTION above the sidebar
+    if ([PorchlightChrome]::Hit($hwnd, $tabs.Right - 8, $y) -ne 2) { return $false } # HTCAPTION in the footer
+    if (!$label) { return $true }
+    $tab = (Find-TerminalItem $strip $viewer.Id $label).Current.BoundingRectangle
+    $tab -and !$tab.IsEmpty -and $tab.Top -lt $y -and $tab.Bottom -gt $y -and
+        [Math]::Abs($button.Top - $tab.Top) -le $scale -and $tabs.Height -le $tab.Height + 9 * $scale -and
+        [PorchlightChrome]::Hit($hwnd, $tab.Left + $tab.Width / 2, $y) -eq 1 # HTCLIENT on the tab itself
+}
+function CaptionFits($expectedHeight) {
+    $scale = [PorchlightChrome]::GetDpiForWindow($hwnd) / 96.0
+    $row = (FindId AppTitleBar).Current.BoundingRectangle
+    if (!$row -or $row.IsEmpty -or [Math]::Abs($row.Height / $scale - $expectedHeight) -gt 1) { return $false }
+    # Check the visual bounds AND the native hit at the bottom of each button, not just its center.
+    $roles = @{ Minimize=8; Maximize=9; Close=20 }
+    foreach ($id in $roles.Keys) {
+        $r = (FindId $id).Current.BoundingRectangle
+        if (!$r -or $r.IsEmpty -or [Math]::Abs($r.Top - $row.Top) -gt 1 -or [Math]::Abs($r.Bottom - $row.Bottom) -gt 1 -or
+            [PorchlightChrome]::Hit($hwnd, $r.Left + $r.Width / 2, $r.Bottom - 2 * $scale) -ne $roles[$id]) { return $false }
+    }
+    return $true
+}
+function TabsMatch([string[]]$expected, [string]$selected) {
+    $tabs = FindId TerminalTabs
+    if (!$tabs -or !$tabs.Current.IsEnabled) { return $false }
+    $items = $tabs.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::TabItem))
+    if ($items.Count -ne $expected.Count) { return $false }
+    foreach ($label in $expected) {
+        $item = Find-TerminalItem $tabs $viewer.Id $label
+        if (!$item -or $item.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -ne ($label -ceq $selected)) { return $false }
+    }
+    return $true
+}
+$localWork = @('t74 · local twin', 't76 · work sibling')
 function CheckScope($machine, $display) {
-    [void](WaitFor "$display / Work selected, dropdown enabled and unselected" {
-        $picker = FindId Picker; $space = SpaceItem $machine Work
-        (FindId ScopeLabel).Current.Name -ceq "$display / Work" -and (FindId Status).Current.Name -cnotlike 'Attached · *' -and
-        $picker -and $picker.Current.ControlType -eq [ControlType]::ComboBox -and $picker.Current.IsEnabled -and
-        $picker.GetCurrentPattern([SelectionPattern]::Pattern).Current.GetSelection().Count -eq 0 -and
-        $space -and $space.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected
+    $expected = if ($machine -eq 'core-local') { $localWork } else { 'studio/t74 · remote twin' }
+    [void](WaitFor "$display / Work selected with only its unselected terminal tabs" {
+        $space = SpaceItem $machine Work
+        (StatusHidden) -and (TabsMatch $expected '') -and $space -and $space.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected
     })
     if ($machine -eq 'core-studio' -and (SpacePattern core-local Work).Current.IsSelected) { throw 'Two spaces selected' }
 }
@@ -196,21 +263,16 @@ function CheckNoAttachButtons {
     }
 }
 function CommitTerminal($address, $name) {
-    $label = "$address · $name"; $picker = FindId Picker
-    $expand = $picker.GetCurrentPattern([ExpandCollapsePattern]::Pattern)
-    if ($expand.Current.ExpandCollapseState -ne 'Expanded') { $expand.Expand() }
-    $item = WaitFor "dropdown item $label" { Find-TerminalItem $picker $root $hwnd $viewer.Id $label }
+    $label = "$address · $name"
+    $item = WaitFor "terminal tab $label" { Find-TerminalItem (FindId TerminalTabs) $viewer.Id $label }
     $selection = $item.GetCurrentPattern([SelectionItemPattern]::Pattern)
     $state.nextTerminal = $address # Only this exact commit may cause one RPC.
     $selection.Select()
     [void](WaitFor "selected and attached $label" {
-        $chosen = $picker.GetCurrentPattern([SelectionPattern]::Pattern).Current.GetSelection()
-        $chosen.Count -eq 1 -and $chosen[0].Current.Name -ceq $label -and $picker.Current.IsEnabled -and
-        (FindId Status).Current.Name -ceq "Attached · $label" -and !$state.nextTerminal
+        (TabsMatch $localWork $label) -and (FindId PaneHost).Current.Name -ceq $label -and (StatusHidden) -and !$state.nextTerminal
     })
-    if ($expand.Current.ExpandCollapseState -eq 'Expanded') { $expand.Collapse() }
     [void](WaitFor "repaint of $address in the native pane" {
-        $pane = $root.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
+        $pane = (FindId PaneHost).FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
         $pattern = $null
         if ($pane -and $pane.TryGetCurrentPattern([TextPattern]::Pattern, [ref]$pattern)) {
             $screen = $pattern.DocumentRange.GetText(-1)
@@ -228,27 +290,42 @@ try {
     $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
     $root = [AutomationElement]::FromHandle($hwnd)
     if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
+    $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
+    if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
     CheckScope core-local Local; CheckNoAttachButtons; CheckLocalOrder
+    [void](WaitFor 'full-height windowed caption buttons' { CaptionFits 40 })
+    if ((FindId WindowLabel) -or (FindId ScopeLabel)) { throw 'Duplicate title or machine/space label in the title bar' }
     if (!(IsExpanded core-local) -or !(IsExpanded core-studio)) { throw 'Machines must start expanded' }
     if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Local machine must be labeled Local' }
     if (FindId PipePath) { throw 'The main pane still contains a pipe editor' }
     foreach ($expanded in $false,$true) {
         ExpandGroup core-studio $expanded; CheckScope core-local Local
     }
+    (SpacePattern core-local Archive).Select()
+    [void](WaitFor 'draggable title bar above the open sidebar and the empty workspace' {
+        (FindId Status).Current.Name -ceq 'No live terminals in this space.' -and (TabsMatch @() '') -and (TabsInCaption)
+    })
     (SpacePattern core-studio Work).Select(); CheckScope core-studio studio
 
-    $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
-    $shown = $toggle.Current.ToggleState; $toggle.Toggle()
-    [void](WaitFor 'hidden sidebar' {
+    $toggleBounds = (FindId SidebarToggle).Current.BoundingRectangle
+    $toggle.Toggle()
+    [void](WaitFor 'hidden sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
-        $toggle.Current.ToggleState -ne $shown -and (!$group -or $group.Current.IsOffscreen) -and
-        (FindId ScopeLabel).Current.Name -ceq 'studio / Work'
+        $toggle.Current.ToggleState -eq 'Off' -and (!$group -or $group.Current.IsOffscreen) -and
+        $toggleBounds.Equals((FindId SidebarToggle).Current.BoundingRectangle) -and (TabsInCaption 'studio/t74 · remote twin')
     })
     $toggle.Toggle()
-    [void](WaitFor 'visible sidebar' {
+    [void](WaitFor 'visible sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
-        $toggle.Current.ToggleState -eq $shown -and $group -and !$group.Current.IsOffscreen
+        $toggle.Current.ToggleState -eq 'On' -and $group -and !$group.Current.IsOffscreen -and
+        $toggleBounds.Equals((FindId SidebarToggle).Current.BoundingRectangle)
     }); CheckScope core-studio studio
+    [void](WaitFor 'tabs in the caption row, to the right of the open sidebar' {
+        $sidebar = (FindId MachineBrowser).Current.BoundingRectangle
+        $tabs = (FindId TerminalTabs).Current.BoundingRectangle
+        $sidebar -and $tabs -and !$sidebar.IsEmpty -and !$tabs.IsEmpty -and
+        $sidebar.Width -gt 0 -and $tabs.Width -gt 0 -and $sidebar.Right -le $tabs.Left -and (TabsInCaption 'studio/t74 · remote twin')
+    })
 
     ExpandGroup core-local $false
     $state.refresh = $true
@@ -261,10 +338,12 @@ try {
     # No attach has been authorized during launch, browsing, sidebar toggles or refresh.
     # Commit two different terminals from Work, then switch back on a third, fresh channel.
     CommitTerminal t74 'local twin'
+    $localWork += 't73 · new sibling'
     $state.refresh = $false
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
     [void](WaitFor 'live catalog refresh without losing the attachment' {
-        !(FindId MachineGroup-core-extra) -and (FindId Status).Current.Name -ceq 'Attached · t74 · local twin' -and (FindId Picker).Current.IsEnabled
+        !(FindId MachineGroup-core-extra) -and (FindId PaneHost).Current.Name -ceq 't74 · local twin' -and
+        (TabsMatch $localWork 't74 · local twin') -and (StatusHidden)
     })
     CommitTerminal t76 'work sibling'
     CommitTerminal t74 'local twin'
@@ -276,8 +355,23 @@ try {
     $state.refresh = $true
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
     [void](WaitFor 'original gateway still connected after leaving the space' { FindId MachineGroup-core-extra })
+    $window = $root.GetCurrentPattern([WindowPattern]::Pattern)
+    foreach ($visualState in 'Maximized','Normal') {
+        (Pattern Maximize ([InvokePattern]::Pattern)).Invoke()
+        $height = if ($visualState -eq 'Maximized') { 32 } else { 40 }
+        $action = if ($visualState -eq 'Maximized') { 'Restore' } else { 'Maximize' }
+        [void](WaitFor "$visualState with a $height DIP caption and $action button" {
+            $window.Current.WindowVisualState -eq $visualState -and (FindId Maximize).Current.Name -ceq $action -and
+            (TabsInCaption 'studio/t74 · remote twin') -and (CaptionFits $height)
+        })
+    }
+    (Pattern Minimize ([InvokePattern]::Pattern)).Invoke()
+    [void](WaitFor 'caption minimized the window' { $window.Current.WindowVisualState -eq 'Minimized' })
+    $window.SetWindowVisualState('Normal')
+    [void](WaitFor 'restored full-height caption buttons' { $window.Current.WindowVisualState -eq 'Normal' -and (CaptionFits 40) })
     $state.closing = $true
-    if (!$viewer.CloseMainWindow() -or !$viewer.WaitForExit(5000)) { throw 'Viewer did not close normally' }
+    (Pattern Close ([InvokePattern]::Pattern)).Invoke()
+    if (!$viewer.WaitForExit(5000)) { throw 'Viewer did not close normally' }
     if ($viewer.ExitCode -ne 0) { throw "Viewer exit code $($viewer.ExitCode)" }
     if (!(Wait-Job $peer -Timeout 5)) { throw 'Fixture did not see viewer disconnect' }
     Receive-Job $peer
@@ -288,4 +382,4 @@ try {
         $pipe.Dispose(); if ($peer) { Remove-Job $peer -Force }; if ($viewer) { $viewer.Dispose() }
     }
 }
-'Machine/space sidebar and dropdown switching smoke test passed.'
+'Machine/space sidebar and terminal tab switching smoke test passed.'

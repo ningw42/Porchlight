@@ -87,21 +87,26 @@ try {
         $viewer=[Diagnostics.Process]::Start($psi)
         $hw = Await 'Porchlight window' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
         CheckOwner $hw; $root=[Windows.Automation.AutomationElement]::FromHandle($hw)
+        $sidebar=(Await 'sidebar toggle' { Find $aid SidebarToggle }).GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+        if ($sidebar.Current.ToggleState -ne 'On') { $sidebar.Toggle() } # The core identity must be visible.
         $label="$id · $name"
-        $picker=Await 'exact core and located fixture before terminal selection' {
-            $s=Find $aid Status; $c=Find $aid CoreLabel; $p=Find $aid Picker
-            if ($s.Current.Name -ceq "Choose $label in Live terminal to view it." -and $c.Current.Name.EndsWith("core $($hello.core.id)") -and $p.Current.IsEnabled) { $p }
+        $item=Await 'exact core and unselected fixture tab' {
+            $c=Find $aid CoreLabel; $tabs=Find $aid TerminalTabs
+            if ($c -and $c.Current.Name.EndsWith("core $($hello.core.id)") -and $tabs.Current.IsEnabled) {
+                $tab=Find-TerminalItem $tabs $viewer.Id $label
+                if ($tab -and !$tab.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) { $tab }
+            }
         }
-        $expand=$picker.GetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern)
-        $expand.Expand()
-        $item=Await 'fixture in the terminal dropdown' { Find-TerminalItem $picker $root $hw $viewer.Id $label }
         if ($item.Current.ProcessId -ne $viewer.Id -or (Owned).state -ne 'live' -or
             !(Find $aid CoreLabel).Current.Name.EndsWith("core $($hello.core.id)")) { throw 'Fixture or window identity changed; refusing selection.' }
         $item.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
-        [void](Await 'attached identity' { (Find $aid Status).Current.Name -ceq "Attached · $label" })
-        if ($expand.Current.ExpandCollapseState -eq 'Expanded') { $expand.Collapse() }
-        $pane=Find ([Windows.Automation.AutomationElement]::ClassNameProperty) 'TermControl'
-        if (!$pane) { throw 'No native terminal control.' }
+        $pane=Await 'selected tab and its attached native pane' {
+            $tab=Find-TerminalItem (Find $aid TerminalTabs) $viewer.Id $label
+            $paneHost=Find $aid PaneHost
+            if ($paneHost.Current.Name -ceq $label -and $tab -and $tab.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) {
+                $paneHost.FindFirst('Descendants', [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ClassNameProperty, 'TermControl'))
+            }
+        }
         $initial=Await 'program challenge in the native buffer' { FrameState ($pass-1) }
         if ($pass -eq 1) {
             $fixturePid=$initial.pid; $pane.SetFocus(); SendFixtureKey 75
