@@ -7,7 +7,7 @@
   <Grid SizeChanged="LayoutSizeChanged" RowDefinitions="Auto,*">
     <Grid x:Name="AppTitleBar" ColumnDefinitions="Auto,*,Auto" AutomationProperties.Name="Window title bar">
       <Grid Width="{x:Bind SidebarHeaderWidth(Workspace.IsPaneOpen, Workspace.OpenPaneLength), Mode=OneWay}" ColumnDefinitions="Auto,*">
-        <ToggleButton x:Name="SidebarToggle" IsChecked="True" Width="28" Height="28" Margin="4,8,0,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top"
+        <ToggleButton x:Name="SidebarToggle" IsChecked="True" Width="28" Height="28" Margin="4,8,4,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top"
                       HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Background="{ThemeResource TabViewButtonBackground}"
                       BorderThickness="{ThemeResource TabViewButtonBorderThickness}" BorderBrush="{ThemeResource TabViewButtonBorderBrush}"
                       AutomationProperties.Name="Machine and space sidebar" ToolTipService.ToolTip="Show or hide the sidebar">
@@ -32,8 +32,11 @@
                CloseButtonOverlayMode="OnPointerOver" TabCloseRequested="TerminalCloseRequested"
                IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" AllowDropTabs="False">
         <TabView.Resources>
-          <!-- A space change replaces a list; don't animate it as a sequence of tab opens/closes. -->
           <Style TargetType="primitives:TabViewListView">
+            <!-- WinUI 1.8 leaves 8 DIPs before the first tab. Cancel that inset so the tab starts at the
+                 workspace edge when the sidebar is open, or at the toggle's right margin when closed. -->
+            <Setter Property="Margin" Value="-8,0,0,0" />
+            <!-- A space change replaces a list; don't animate it as a sequence of tab opens/closes. -->
             <Setter Property="ItemContainerTransitions">
               <Setter.Value><TransitionCollection /></Setter.Value>
             </Setter>
@@ -93,7 +96,8 @@
         </Grid>
       </SplitView.Pane>
 
-      <Grid Padding="12" RowDefinitions="Auto,*" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
+      <Grid x:Name="WorkspaceFrame" AutomationProperties.Name="Terminal workspace"
+            Padding="12" RowDefinitions="Auto,*" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
         <TextBlock x:Name="Status" Visibility="Collapsed" Margin="0,0,0,8" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
         <Border x:Name="PaneHost" Grid.Row="1" Background="#282c34" CornerRadius="4" />
       </Grid>

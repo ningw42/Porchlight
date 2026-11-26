@@ -52,7 +52,7 @@ public sealed partial class MainWindow
         maximizedChrome = maximized;
         int inset = maximized ? 0 : 8;
         TerminalTabs.Padding = new Thickness(0, inset, 0, 0);
-        SidebarToggle.Margin = new Thickness(4, inset, 0, 0);
+        SidebarToggle.Margin = SidebarToggle.Margin with { Top = inset };
         TabDragArea.MinHeight = 32 + inset;
         MaximizeButton.Content = maximized ? "\uE923" : "\uE922";
         var action = maximized ? "Restore" : "Maximize";

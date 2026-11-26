@@ -225,16 +225,13 @@ function StatusHidden {
     $status = FindId Status
     !$status -or $status.Current.IsOffscreen
 }
-function TabsInCaption($label) {
+function TabsInCaption($firstTabLabel) {
     $strip = FindId TerminalTabs
     $tabs = $strip.Current.BoundingRectangle
     $minimize = (FindId Minimize).Current.BoundingRectangle
     $button = (FindId SidebarToggle).Current.BoundingRectangle
     if (!$tabs -or $tabs.IsEmpty -or !$minimize -or $minimize.IsEmpty -or !$button -or $button.IsEmpty) { return $false }
     $scale = [PorchlightChrome]::GetDpiForWindow($hwnd) / 96.0
-    $left = (FindId AppTitleBar).Current.BoundingRectangle.Left
-    if ([Math]::Abs($button.Left - $left) -gt 8 * $scale -or $tabs.Left -lt $button.Right - 1) { return $false }
-    if ($toggle.Current.ToggleState -eq 'Off' -and $tabs.Left -gt $button.Right + 8 * $scale) { return $false }
     if ([PorchlightChrome]::Hit($hwnd, $button.Left + $button.Width / 2, $button.Top + $button.Height / 2) -ne 1) { return $false }
     $y = [int]($minimize.Top + $minimize.Height / 2)
     if ($tabs.Top -ge $y -or $tabs.Bottom -le $y -or $tabs.Right -gt $minimize.Left + 1) { return $false }
@@ -242,9 +239,13 @@ function TabsInCaption($label) {
     if ($toggle.Current.ToggleState -eq 'On' -and
         [PorchlightChrome]::Hit($hwnd, ($button.Right + $tabs.Left) / 2, $y) -ne 2) { return $false } # HTCAPTION above the sidebar
     if ([PorchlightChrome]::Hit($hwnd, $tabs.Right - 8, $y) -ne 2) { return $false } # HTCAPTION in the footer
-    if (!$label) { return $true }
-    $tab = (Find-TerminalItem $strip $viewer.Id $label).Current.BoundingRectangle
-    $tab -and !$tab.IsEmpty -and $tab.Top -lt $y -and $tab.Bottom -gt $y -and
+    if (!$firstTabLabel) { return $true }
+    $tab = (Find-TerminalItem $strip $viewer.Id $firstTabLabel).Current.BoundingRectangle
+    $frame = (FindId WorkspaceFrame).Current.BoundingRectangle
+    if (!$frame -or $frame.IsEmpty -or !$tab -or $tab.IsEmpty) { return $false }
+    # With the pane closed, the frame starts at the left client edge: mirror the toggle's outer gap.
+    $expectedLeft = if ($toggle.Current.ToggleState -eq 'On') { $frame.Left } else { $button.Right + ($button.Left - $frame.Left) }
+    [Math]::Abs($tab.Left - $expectedLeft) -le 1 -and $tab.Top -lt $y -and $tab.Bottom -gt $y -and
         [Math]::Abs($button.Top - $tab.Top) -le $scale -and $tabs.Height -le $tab.Height + 9 * $scale -and
         [PorchlightChrome]::Hit($hwnd, $tab.Left + $tab.Width / 2, $y) -eq 1 # HTCLIENT on the tab itself
 }
@@ -401,6 +402,7 @@ try {
     # No attach has been authorized during launch, browsing, sidebar toggles or refresh.
     # Commit two different terminals from Work, then switch back on a third, fresh channel.
     CommitTerminal t74 'local twin · pwsh'
+    [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork[0] })
     $localWork[0] = 't74 · local twin · Git Changes'; $localWork += 't73 · new sibling'
     $state.refresh = $false
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
