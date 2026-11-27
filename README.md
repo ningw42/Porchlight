@@ -72,13 +72,28 @@ The named entry in `schemes` supplies all 16 ANSI colors plus foreground, backgr
 & $app '--face=Cascadia Code, SimHei, KaiTi, Segoe UI Emoji, Symbols Nerd Font Mono' --ss01=1 --calt=0
 ```
 
-## Sidebar smoke test
+## GUI smoke suites
 
-After building Debug, run `pwsh -NoProfile -File .\tests\smoke\MachineSpaces.ps1 -Exe $app` on the interactive desktop (PowerShell 7.4+; `$app` is defined above). It launches a separate viewer against a private fake gateway, opens Settings and checks the font picker without disturbing the attached terminal, switches between synthetic terminal streams on the same pipe, and closes a remote tab without affecting its local twin or the window. It never opens a real core or attaches to a user program. Add `-CheckFocus` and leave the test window in the foreground to also verify keyboard focus. Pass `-Startup Select` or `-Startup Browse` to exercise exact-target or metadata-only startup instead of the default.
+After building Debug, run the suite that covers your change from an interactive Windows desktop (PowerShell 7.4+; `$app` is defined above):
 
-Add `-CheckSidebarPixels` to check the **presented terminal pixels**, not just the window layout. Enable Windows animation effects and keep both fixture windows on the same monitor. The test launches them **in sequence** from the same executable; the first uses `--no-sidebar-animation` as an instant reference without changing system settings. It samples one scanline of the topmost fixture and saves no screenshots. Expansion must keep its leading cells visible. On collapse the peer repaints a right-aligned marker after 0, 40, 80 or 160 ms: waiting for it is allowed, moving the right edge or sending extra resizes is not. For each delay the test reports 10-trial median toggle-to-repaint times and fails if animation adds more than one monitor refresh interval.
+```powershell
+.\tests\smoke\MachineSpaces.ps1 -Exe $app -Suite Settings        # one suite
+.\tests\smoke\MachineSpaces.ps1 -Exe $app -Suite Spaces,TabClose # related suites
+.\tests\smoke\MachineSpaces.ps1 -Exe $app                        # all four standard suites
+```
 
-To compare space-switch responsiveness between builds on the same desktop, add `-MeasureSwitchTabs 12`. This alternates between two synthetic 12-terminal spaces and reports the warm median from selection until UI Automation sees a laid-out destination header. Each space switch also requests its terminal; the header timing is not a measurement of attach or repaint latency.
+| Suite | Run it when changing |
+| --- | --- |
+| `Settings` | Settings window, layout, font picker or preview |
+| `Sidebar` | Sidebar transitions, tab alignment, title bar or caption buttons |
+| `Spaces` | Machine groups, catalog updates, tab selection, switching or focus |
+| `TabClose` | Close requests, refusals or terminal-exit notices |
+
+Each suite starts its own viewer on a private fake gateway; none opens a real core or attaches to a user program. Add `-Startup Select` or `-Startup Browse` to exercise exact-target or metadata-only startup. For keyboard focus checks, add `-CheckFocus` and leave the fixture in the foreground. Run all four suites when changing shared fixture or viewer startup code.
+
+Run `-Suite SidebarPixels` on its own (or add `-CheckSidebarPixels` to a standard run) to check the **presented terminal pixels**, not just the window layout. Enable Windows animation effects and keep both fixture windows on the same monitor. The test launches them **in sequence** from the same executable; the first uses `--no-sidebar-animation` as an instant reference without changing system settings. It samples one scanline of the topmost fixture and saves no screenshots. Expansion must keep its leading cells visible. On collapse the peer repaints a right-aligned marker after 0, 40, 80 or 160 ms: waiting for it is allowed, moving the right edge or sending extra resizes is not. For each delay the test reports 10-trial median toggle-to-repaint times and fails if animation adds more than one monitor refresh interval.
+
+To compare space-switch responsiveness between builds on the same desktop, pass `-MeasureSwitchTabs 12` instead of `-Suite`. This alternates between two synthetic 12-terminal spaces and reports the warm median from selection until UI Automation sees a laid-out destination header. Each space switch also requests its terminal; the header timing is not a measurement of attach or repaint latency.
 
 ## Smoke test on an existing core
 

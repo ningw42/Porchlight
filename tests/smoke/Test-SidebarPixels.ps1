@@ -1,4 +1,4 @@
-# MachineSpaces calls this with its synthetic terminal wide and fully painted. Return it wide.
+# The SidebarPixels suite supplies a wide, fully painted synthetic terminal. Return it wide.
 param($Hwnd, $Frame, $Toggle, $State, [switch]$Instant, $Baseline)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing.Common,System.Windows.Forms
