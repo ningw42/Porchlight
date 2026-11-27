@@ -25,7 +25,7 @@ public static class PorchlightChrome {
 # Bind before starting the viewer. One hello and one subscription on this pipe; no real core or program.
 $name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
 $pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
-$state = [hashtable]::Synchronized(@{ extraMachine=$false; catalogEdit=$null; closing=$false; expectDetach=$false
+$state = [hashtable]::Synchronized(@{ extraMachineState=$null; catalogEdit=$null; closing=$false; expectDetach=$false
     nextTerminal=$null; activeAddress=$null; measureTabs=$MeasureSwitchTabs; deferLocalLayout=($Startup -eq 'Select') })
 $viewer = $peer = $root = $null
 $serve = {
@@ -109,7 +109,7 @@ $serve = {
         switch -CaseSensitive ($request.method) {
             'machine.list' {
                 $machines = @(@{ id='core-studio'; name='studio'; state='connected' })
-                if ($state.extraMachine) { $machines += @{ id='core-extra'; name='extra'; state='connected' } }
+                if ($state.extraMachineState) { $machines += @{ id='core-extra'; name='extra'; state=$state.extraMachineState } }
                 $result = @{ machines=$machines }
                 switch ($state.catalogEdit) {
                     'retitle' {
@@ -360,6 +360,7 @@ function CommitTerminal($terminals, $address) {
     $selection = $item.GetCurrentPattern([SelectionItemPattern]::Pattern)
     AuthorizeAttach $address
     $selection.Select()
+    if (!(StatusHidden)) { throw "Unexpected workspace notice while switching to $label" }
     [void](WaitFor "selected and attached $label" {
         (TabsMatch $terminals.Values $label) -and (PaneMatches $address $label) -and (StatusHidden)
     })
@@ -428,7 +429,9 @@ try {
     [void](WaitFor 'full-height windowed caption buttons' { CaptionFits 40 })
     if ((FindId WindowLabel) -or (FindId ScopeLabel)) { throw 'Duplicate title or machine/space label in the title bar' }
     if (!(IsExpanded core-local) -or !(IsExpanded core-studio)) { throw 'Machines must start expanded' }
-    if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Local machine must be labeled Local' }
+    if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Missing accessible machine name or state' }
+    if ((FindId CoreLabel).Current.Name -cne 'HerdR smoke · core core-local') { throw 'Missing gateway identity' }
+    if (FindId StateLabel) { throw 'Connected machines should not have a state caption' }
     if (FindId PipePath) { throw 'The main pane still contains a pipe editor' }
     foreach ($expanded in $false,$true) {
         ExpandGroup core-studio $expanded; CheckScope core-local Work $localWork $startupTerminal
@@ -491,9 +494,11 @@ try {
 
     SelectSpace core-studio Work $remoteWork core-studio/t74
     ExpandGroup core-local $false
-    $state.extraMachine = $true
+    $state.extraMachineState = 'needs_login'
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'new machine from refresh reply' { FindId MachineGroup-core-extra })
+    [void](WaitFor 'unavailable machine with a specific reason' {
+        (FindId MachineGroup-core-extra).Current.Name -ceq 'extra, needs login' -and (FindId StateLabel).Current.Name -ceq 'needs login'
+    })
     if (!(IsExpanded core-extra) -or (IsExpanded core-local)) { throw 'Refresh reset expansion state' }
     ExpandGroup core-local $true; CheckScope core-studio Work $remoteWork core-studio/t74; CheckLocalOrder
     CommitTerminal $remoteWork core-studio/t76
@@ -502,7 +507,7 @@ try {
     if ($startupTerminal -ceq 't76') { CommitTerminal $localWork t74 }
     [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork.t74 })
     $localWork.t74 = 't74 · local twin · Git Changes'; $localWork.t73 = 't73 · new sibling'
-    $state.extraMachine = $false; $state.catalogEdit = 'insert'
+    $state.extraMachineState = $null; $state.catalogEdit = 'insert'
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
     [void](WaitFor 'removed extra machine' { !(FindId MachineGroup-core-extra) })
     CheckScope core-local Work $localWork t74 # Inserted t73 and renamed t74; no new viewer.
@@ -521,7 +526,7 @@ try {
     CommitTerminal $localWork t76
     SelectSpace core-studio Work $remoteWork core-studio/t76 # Same terminal ID, different viewer/route.
 
-    $state.extraMachine = $true; $state.catalogEdit = 'finish-hidden'
+    $state.extraMachineState = 'connected'; $state.catalogEdit = 'finish-hidden'
     (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
     [void](WaitFor 'original gateway still connected after leaving the space' { FindId MachineGroup-core-extra })
     CheckScope core-studio 'Renamed Work' $remoteWork core-studio/t76 # Same viewer through the sidebar rename.

@@ -116,6 +116,7 @@ public class SessionTests
     {
         var missing = CoreEndpoint.Select(CoreEndpoint.Prefix + "porchlight-absent-" + Guid.NewGuid().ToString("N"));
         var failure = await Assert.ThrowsExactlyAsync<CoreException>(() => CoreSession.ConnectAsync(missing));
+        Assert.IsTrue(failure.IsConnectionTimeout);
         StringAssert.Contains(failure.Message,"selected pipe");
     }
     [TestMethod]
@@ -130,6 +131,8 @@ public class SessionTests
     public async Task RejectUnnegotiatedGeneration()
     {
         using var p = new Peer(); var connecting = CoreSession.ConnectAsync(p.Endpoint); await p.Hello(generation:2);
-        var ex = await Assert.ThrowsExactlyAsync<CoreException>(() => connecting); StringAssert.Contains(ex.Message,"generation 1");
+        var ex = await Assert.ThrowsExactlyAsync<CoreException>(() => connecting);
+        Assert.IsFalse(ex.IsConnectionTimeout);
+        StringAssert.Contains(ex.Message,"generation 1");
     }
 }

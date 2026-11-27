@@ -70,8 +70,11 @@ public sealed partial class MainWindow : Window
         Status.Visibility = message.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    static string SetupMessage(Exception ex) => ex is CoreException or FormatException or ArgumentException or IOException
-        ? ex.Message : "Cannot connect to the configured gateway.";
+    static string SetupMessage(Exception ex) => ex switch {
+        CoreException { IsConnectionTimeout: true } => "",
+        CoreException or FormatException or ArgumentException or IOException => ex.Message,
+        _ => "Cannot connect to the configured gateway."
+    };
 
     void Connect()
     {
@@ -81,13 +84,13 @@ public sealed partial class MainWindow : Window
             endpoint ??= options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
             connecting = ConnectTo(endpoint);
         }
-        catch (Exception ex) { ShowStatus(SetupMessage(ex) + " Use the sidebar refresh to retry."); Controls(); }
+        catch (Exception ex) { ShowStatus(SetupMessage(ex)); Controls(); }
     }
 
     async Task ConnectTo(CoreEndpoint endpoint)
     {
         busy = true; Controls();
-        ShowStatus("Connecting to the gateway…");
+        ShowStatus();
         try
         {
             var s = await CoreSession.ConnectAsync(endpoint, lifetime.Token);
@@ -99,7 +102,7 @@ public sealed partial class MainWindow : Window
             _ = WatchGateway(s);
         }
         catch (OperationCanceledException) when (closing) { }
-        catch (Exception ex) { ShowStatus(SetupMessage(ex) + " Use the sidebar refresh to retry."); }
+        catch (Exception ex) { ShowStatus(SetupMessage(ex)); }
         finally { busy = false; Controls(); }
     }
 
@@ -132,7 +135,6 @@ public sealed partial class MainWindow : Window
             if (machine != null && catalog.AwaitingLayout(machine) && !useAvailableLayout)
             {
                 if (initial) _ = FinishStartupIfLayoutIsLate(s);
-                viewerNotice = "Loading spaces…";
                 ShowScope(catalog, machine, null);
                 return;
             }
@@ -207,7 +209,6 @@ public sealed partial class MainWindow : Window
             group.Display(m, catalog.SpacesFor(m), m.Id == selectedMachine?.Id ? selectedSpace : null);
         }
         while (rows.Count > machines.Count) rows.RemoveAt(rows.Count - 1);
-        EmptyMachines.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void SpaceChanged(MachineSpaceGroup group)
@@ -237,11 +238,10 @@ public sealed partial class MainWindow : Window
     void SelectionStatus()
     {
         if (requested != null || session == null || closing) return;
-        ShowStatus(viewerNotice ?? (selectedMachine switch {
+        ShowStatus(startupPending ? "" : viewerNotice ?? (selectedMachine switch {
             { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
             { } m when selectedSpace == null && session.Directory.SpacesFor(m).Count == 0 => "No live terminals on this machine.",
-            _ when selectedSpace == null => "Select a space in the sidebar.",
-            _ when shownTabs.Length == 0 => "No live terminals in this space.",
+            _ when selectedSpace != null && shownTabs.Length == 0 => "No live terminals in this space.",
             _ => ""
         }));
     }
@@ -249,6 +249,7 @@ public sealed partial class MainWindow : Window
     {
         if (TerminalTabs == null || RefreshMachinesButton == null) return;
         bool idle = !busy && !closing;
+        CoreLabel.Visibility = session == null ? Visibility.Collapsed : Visibility.Visible;
         MachineBrowser.IsEnabled = idle && session != null;
         RefreshMachinesButton.IsEnabled = idle && configured && (session == null || session.SupportsMachineList);
         var refresh = session == null ? "Retry gateway connection" : "Refresh machines";
@@ -263,8 +264,7 @@ public sealed partial class MainWindow : Window
         if (session != s || closing) return;
         session = null; startupPending = false;
         RequestViewer(null);
-        CoreLabel.Text = "Not connected";
         ShowScope(new([], []), null, null);
-        ShowStatus(end.Message + " Use the sidebar refresh to retry.");
+        ShowStatus(end.Message);
     }
 }

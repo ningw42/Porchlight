@@ -26,7 +26,7 @@ public sealed partial class MainWindow
         long version = ++revision;
         if (connection != null) _ = connection.CloseAsync();
         AutomationProperties.SetName(PaneHost, "");
-        if (target != null) ShowStatus($"Attaching to {target.Address}…");
+        if (target != null) ShowStatus();
         changingViewer = ChangeViewer(changingViewer, version, session, target);
     }
 

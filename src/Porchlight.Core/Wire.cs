@@ -77,4 +77,7 @@ internal static class Wire
 }
 
 // Only messages authored by the client, never raw RPC errors, bytes or JSON fragments.
-public sealed class CoreException(string message) : Exception(message);
+public sealed class CoreException(string message) : Exception(message)
+{
+    public bool IsConnectionTimeout { get; internal init; }
+}

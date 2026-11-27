@@ -21,6 +21,7 @@ public sealed partial class MachineSpaceGroup : UserControl
             Machine = machine;
             MachineName.Text = machine.DisplayName;
             StateLabel.Text = machine.State.Replace('_', ' ');
+            StateLabel.Visibility = machine.Available ? Visibility.Collapsed : Visibility.Visible;
             OnlineIcon.Visibility = machine.Available ? Visibility.Visible : Visibility.Collapsed;
             OfflineIcon.Visibility = machine.Available ? Visibility.Collapsed : Visibility.Visible;
             AutomationProperties.SetName(Group, $"{machine.DisplayName}, {StateLabel.Text}");
@@ -31,7 +32,6 @@ public sealed partial class MachineSpaceGroup : UserControl
         if (!shownSpaces.SequenceEqual(spaces)) Spaces.ItemsSource = shownSpaces = spaces;
         Spaces.SelectedItem = shownSpaces.FirstOrDefault(s => s == selected);
         Spaces.Visibility = spaces.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
-        NoSpaces.Visibility = spaces.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     void SpaceSelectionChanged(object sender, SelectionChangedEventArgs e) => SpaceChanged?.Invoke(this);

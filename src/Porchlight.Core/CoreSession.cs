@@ -69,7 +69,7 @@ public sealed class CoreSession : IAsyncDisposable
             token.ThrowIfCancellationRequested();
             throw e switch {
                 CoreException safe => safe,
-                TimeoutException or OperationCanceledException => new CoreException("Core did not answer. Check that HerdR is running at the selected pipe, then reconnect."),
+                TimeoutException or OperationCanceledException => new CoreException("Core did not answer. Check that HerdR is running at the selected pipe, then reconnect.") { IsConnectionTimeout = true },
                 UnauthorizedAccessException => new CoreException("Access denied. Run as the core's desktop user and verify its pipe."),
                 _ => new CoreException("Cannot negotiate with this pipe. Verify the endpoint and that the running core supports generation 1 framed events and attach.")
             };

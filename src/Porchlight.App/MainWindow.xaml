@@ -82,21 +82,17 @@
                IsPaneOpen="{Binding IsChecked, ElementName=SidebarToggle, Mode=TwoWay}"
                PaneBackground="{ThemeResource LayerFillColorDefaultBrush}">
       <SplitView.Pane>
-        <Grid Padding="12" RowDefinitions="Auto,*,Auto" RowSpacing="12">
-          <Grid ColumnDefinitions="*,Auto">
-            <TextBlock Text="Machines" VerticalAlignment="Center" Style="{ThemeResource SubtitleTextBlockStyle}" />
-            <Button x:Name="RefreshMachinesButton" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}"
-                    AutomationProperties.Name="Refresh machines" ToolTipService.ToolTip="Refresh machine connections" Click="RefreshMachines_Click">
+        <Grid Padding="12" RowDefinitions="*,Auto" RowSpacing="12">
+          <ScrollViewer x:Name="MachineBrowser" AutomationProperties.Name="Machines" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="MachineGroups" Spacing="6" />
+          </ScrollViewer>
+          <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <TextBlock x:Name="CoreLabel" VerticalAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+            <Button x:Name="RefreshMachinesButton" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}" Click="RefreshMachines_Click">
               <FontIcon Glyph="&#xE72C;" FontSize="16" />
             </Button>
           </Grid>
-          <TextBlock x:Name="EmptyMachines" Grid.Row="1" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                     Text="Machines and spaces appear when the gateway connects. Use the refresh button to retry." />
-          <ScrollViewer x:Name="MachineBrowser" Grid.Row="1" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="MachineGroups" Spacing="6" />
-          </ScrollViewer>
-          <TextBlock x:Name="CoreLabel" Grid.Row="2" Style="{ThemeResource CaptionTextBlockStyle}"
-                     Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Not connected" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
         </Grid>
       </SplitView.Pane>
 
