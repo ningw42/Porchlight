@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using System.Runtime.InteropServices;
 using Windows.Foundation;
 using Windows.Graphics;
@@ -16,6 +17,14 @@ public sealed partial class MainWindow
     bool regionCheckQueued;
     bool? maximizedChrome;
     NonClientRegionKind? pressedCaption;
+
+    // At an open sidebar, align the tab fill and clip its 4-DIP overhang at the workspace edge.
+    // Clip the strip, not each tab, so tabs away from the sidebar retain both curves.
+    readonly RectangleGeometry tabViewportClip = new();
+    RectangleGeometry? TabStripClip(bool paneOpen) => paneOpen ? tabViewportClip : null;
+    Thickness TabStripMargin(bool paneOpen) => new(paneOpen ? -4 : 0, 0, 0, 0);
+    void TabViewportSizeChanged(object sender, SizeChangedEventArgs e) =>
+        tabViewportClip.Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height);
 
     void ConfigureTitleBar()
     {
