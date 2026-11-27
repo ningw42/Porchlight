@@ -1,0 +1,33 @@
+<Page x:Class="Porchlight.App.TerminalSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:local="using:Porchlight.App">
+  <Page.Resources>
+    <DataTemplate x:Key="FontNameTemplate" x:DataType="x:String">
+      <TextBlock Text="{x:Bind}" FontFamily="{x:Bind}" />
+    </DataTemplate>
+  </Page.Resources>
+  <ScrollViewer MaxWidth="840" VerticalScrollBarVisibility="Auto">
+    <StackPanel Padding="24" Spacing="16">
+      <TextBlock x:Name="TerminalPageHeading" Text="Terminal" Style="{ThemeResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+      <local:TerminalAppearancePreview x:Name="AppearancePreview" />
+      <controls:SettingsCard x:Name="FontSettingsCard" Header="Font families" Description="Add fonts in fallback order. Changes only affect the preview."
+                             ContentAlignment="Vertical">
+        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+          <controls:TokenizingTextBox x:Name="TerminalFontPicker" AutomationProperties.Name="Terminal font families"
+              PlaceholderText="Type a font name…" TokenDelimiter="," TextChanged="FontQueryChanged" TokenItemAdding="FontAdding"
+              TokenItemTemplate="{StaticResource FontNameTemplate}" SuggestedItemTemplate="{StaticResource FontNameTemplate}">
+            <controls:TokenizingTextBox.Resources>
+              <Thickness x:Key="TextBoxTopHeaderMargin">0</Thickness>
+            </controls:TokenizingTextBox.Resources>
+            <controls:TokenizingTextBox.QueryIcon><FontIconSource Glyph="&#xE721;" FontSize="12" /></controls:TokenizingTextBox.QueryIcon>
+          </controls:TokenizingTextBox>
+          <Button x:Name="ResetFontsButton" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}" VerticalAlignment="Top"
+                  AutomationProperties.Name="Reset fonts" ToolTipService.ToolTip="Reset to launch fonts" Click="ResetFonts">
+            <FontIcon Glyph="&#xE777;" FontSize="16" />
+          </Button>
+        </Grid>
+      </controls:SettingsCard>
+    </StackPanel>
+  </ScrollViewer>
+</Page>

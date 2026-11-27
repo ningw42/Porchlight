@@ -1,0 +1,21 @@
+<Window x:Class="Porchlight.App.SettingsWindow" Title="Porchlight Settings"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Window.SystemBackdrop>
+    <MicaBackdrop />
+  </Window.SystemBackdrop>
+  <NavigationView x:Name="Categories" AutomationProperties.Name="Settings categories"
+                  PaneDisplayMode="Left" OpenPaneLength="200" IsPaneOpen="True" IsPaneToggleButtonVisible="False"
+                  IsBackButtonVisible="Collapsed" IsSettingsVisible="False" IsTitleBarAutoPaddingEnabled="False"
+                  SelectionChanged="CategorySelected">
+    <NavigationView.PaneHeader>
+      <TextBlock Text="Settings" Style="{ThemeResource SubtitleTextBlockStyle}" Margin="16,20,0,12" />
+    </NavigationView.PaneHeader>
+    <NavigationView.MenuItems>
+      <NavigationViewItem x:Name="TerminalCategory" Content="Terminal">
+        <NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" /></NavigationViewItem.Icon>
+      </NavigationViewItem>
+    </NavigationView.MenuItems>
+    <Frame x:Name="CategoryPage" IsNavigationStackEnabled="False" />
+  </NavigationView>
+</Window>

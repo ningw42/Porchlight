@@ -45,6 +45,11 @@ function Await($description,[scriptblock]$condition) {
 function Find($property,$value) {
     $root.FindFirst('Descendants',[Windows.Automation.PropertyCondition]::new($property,$value))
 }
+function WindowShowsCore {
+    $group=Find $aid "MachineGroup-$($hello.core.id)"
+    $group -and $group.Current.ProcessId -eq $viewer.Id -and $group.Current.Name -ceq 'Local, connected' -and
+        !$group.Current.IsOffscreen -and !$group.Current.BoundingRectangle.IsEmpty
+}
 function CheckOwner([IntPtr]$h) {
     [uint32]$owner = 0
     if ($h -eq [IntPtr]::Zero -or ![PorchlightSmokeWindow]::GetWindowThreadProcessId($h,[ref]$owner) -or $owner -ne $viewer.Id) { throw 'Wrong HWND owner.' }
@@ -92,14 +97,13 @@ try {
         if ($sidebar.Current.ToggleState -ne 'On') { $sidebar.Toggle() } # The core identity must be visible.
         $label="$id · $name"
         $item=Await 'exact core and unselected fixture tab' {
-            $c=Find $aid CoreLabel; $tabs=Find $aid TerminalTabs
-            if ($c -and $c.Current.Name.EndsWith("core $($hello.core.id)") -and $tabs.Current.IsEnabled) {
+            $tabs=Find $aid TerminalTabs
+            if ((WindowShowsCore) -and $tabs.Current.IsEnabled) {
                 $tab=Find-TerminalItem $tabs $viewer.Id $label
                 if ($tab -and !$tab.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) { $tab }
             }
         }
-        if ($item.Current.ProcessId -ne $viewer.Id -or (Owned).state -ne 'live' -or
-            !(Find $aid CoreLabel).Current.Name.EndsWith("core $($hello.core.id)")) { throw 'Fixture or window identity changed; refusing selection.' }
+        if ($item.Current.ProcessId -ne $viewer.Id -or (Owned).state -ne 'live' -or !(WindowShowsCore)) { throw 'Fixture or window identity changed; refusing selection.' }
         $item.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()
         $pane=Await 'selected tab and its attached native pane' {
             $tab=Find-TerminalItem (Find $aid TerminalTabs) $viewer.Id $label

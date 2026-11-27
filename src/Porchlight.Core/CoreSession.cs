@@ -200,9 +200,9 @@ public sealed class CoreSession : IAsyncDisposable
     {
         var current = Directory;
         var target = current.Terminals.FirstOrDefault(t => t.Address == address)
-            ?? throw new CoreException("That program or machine is no longer available. Refresh and select again.");
+            ?? throw new CoreException("That program or machine is no longer available. Select a live terminal.");
         var machine = current.Machines.Single(m => target.MachineAlias is null ? m.IsLocal : !m.IsLocal && m.Name == target.MachineAlias);
-        if (machine.Id != expectedMachineId) throw new CoreException("The selected machine changed. Refresh and select again.");
+        if (machine.Id != expectedMachineId) throw new CoreException("The selected machine changed. Select a terminal on the intended machine.");
         // Pin the outbound route even if a later refresh reassigns this alias.
         return machine.IsLocal ? address : machine.Id + address[address.IndexOf('/')..];
     }
@@ -227,7 +227,7 @@ public sealed class CoreSession : IAsyncDisposable
         try
         {
             if (!await reply.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false))
-                throw new CoreException("Core refused terminal.kill. Refresh and check the program's state.");
+                throw new CoreException("Core refused terminal.kill. Check the program's state in HerdR.");
         }
         catch (TimeoutException)
         {
@@ -454,7 +454,7 @@ public sealed class CoreSession : IAsyncDisposable
             if (closing || stop.IsCancellationRequested) throw new OperationCanceledException();
             if (response is not { } result)
             {
-                FinishAttachment(lease, new(EndKind.Detached, "Core refused the attachment. Refresh and select a live program."));
+                FinishAttachment(lease, new(EndKind.Detached, "Core refused the attachment. Select a live program."));
                 return;
             }
             var ch = Wire.Channel(result);

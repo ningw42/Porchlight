@@ -16,6 +16,11 @@ public static class PorchlightChrome {
     [DllImport("user32")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32", SetLastError=true)] static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    public static void Resize(IntPtr hwnd, int w, int h) {
+        // SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
+        if (!SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, h, 0x16)) throw new System.ComponentModel.Win32Exception();
+    }
     [DllImport("user32")] static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     public static int Hit(IntPtr hwnd, int x, int y) =>
         (int)SendMessage(hwnd, 0x0084, IntPtr.Zero, (IntPtr)((x & 0xffff) | (y << 16)));
@@ -82,6 +87,35 @@ $serve = {
             WriteFrame $active 2 ([byte[]]@())
             $active = 0; $state.activeAddress = $null; $holdingClose = $null
         }
+        # A test command can arrive on an idle pipe. Keep the same outstanding read and a single writer.
+        while ([Threading.Tasks.Task]::WhenAny($state.catalogEdit.Task, $read).GetAwaiter().GetResult() -ne $read) {
+            $edit = $state.catalogEdit.Task.Result
+            $state.catalogEdit = [Threading.Tasks.TaskCompletionSource[string]]::new()
+            switch ($edit) {
+                'retitle' {
+                    $targets.t75.title = 'π - Porchlight'
+                    WriteEvent @{ seq=80; type='title'; terminal='t75'; data=@{title=$targets.t75.title} }
+                }
+                'insert' {
+                    if ($state.activeAddress -cne 't74') { throw 'Expected the local twin during catalog insertion' }
+                    # Insert before the selected tab; preserve its address, not its index.
+                    $targets.t73 = @{ address='t73'; name='new sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
+                    WriteEvent @{ seq=81; type='created'; terminal='t73'; data=$targets.t73 }
+                    $targets.t74.foreground = @{argv=@('C:\tools\lazygit.exe'); cwd='C:\fixture\Work\src'}
+                    WriteEvent @{ seq=82; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
+                }
+                'finish-hidden' {
+                    if ($state.activeAddress -cne 'core-studio/t76') { throw 'Expected the remote t76 while local t76 finishes' }
+                    $targets.Remove('t76')
+                    WriteEvent @{ seq=83; type='finished'; terminal='t76' }
+                    $targets.t74.foreground = @{argv=@('pwsh.exe'); cwd='C:\fixture\Work\src'}
+                    WriteEvent @{ seq=84; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
+                    $studioSpaceName = 'Renamed Work' # Same core and space ID in the next doc.get.
+                    WriteEvent @{ seq=85; type='doc'; machine='studio'; data=@{name='herdr-app'} }
+                }
+                default { throw "Unexpected fixture command: $edit" }
+            }
+        }
         $got = $read.GetAwaiter().GetResult()
         if (!$got) { if ($state.closing -and !$active) { return }; throw "Unexpected disconnect (active channel: $active)" }
         $pipe.ReadExactly($header, $got, $header.Length - $got)
@@ -124,32 +158,9 @@ $serve = {
         if ($state.switchesOnly -and $request.method -cne 'terminal.attach') { throw "Unexpected benchmark RPC: $($request.method)" }
         switch -CaseSensitive ($request.method) {
             'machine.list' {
-                $machines = @(@{ id='core-studio'; name='studio'; state='connected' })
-                if ($state.extraMachineState) { $machines += @{ id='core-extra'; name='extra'; state=$state.extraMachineState } }
-                $result = @{ machines=$machines }
-                switch ($state.catalogEdit) {
-                    'retitle' {
-                        $targets.t75.title = 'π - Porchlight'
-                        WriteEvent @{ seq=80; type='title'; terminal='t75'; data=@{title=$targets.t75.title} }
-                    }
-                    'insert' {
-                        if ($state.activeAddress -cne 't74') { throw 'Expected the local twin during catalog insertion' }
-                        # Insert before the selected tab; preserve its address, not its index.
-                        $targets.t73 = @{ address='t73'; name='new sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
-                        WriteEvent @{ seq=81; type='created'; terminal='t73'; data=$targets.t73 }
-                        $targets.t74.foreground = @{argv=@('C:\tools\lazygit.exe'); cwd='C:\fixture\Work\src'}
-                        WriteEvent @{ seq=82; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
-                    }
-                    'finish-hidden' {
-                        if ($state.activeAddress -cne 'core-studio/t76') { throw 'Expected the remote t76 while local t76 finishes' }
-                        $targets.Remove('t76')
-                        WriteEvent @{ seq=83; type='finished'; terminal='t76' }
-                        $targets.t74.foreground = @{argv=@('pwsh.exe'); cwd='C:\fixture\Work\src'}
-                        WriteEvent @{ seq=84; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
-                        $studioSpaceName = 'Renamed Work' # Same core and space ID in the next doc.get.
-                    }
-                }
-                $state.catalogEdit = $null
+                if ($listed -or $subscribed) { throw 'Expected machine.list only once at startup' }; $listed = $true
+                $result = @{ machines=@(@{ id='core-studio'; name='studio'; state='connected' },
+                                        @{ id='core-extra'; name='extra'; state='needs_login' }) }
             }
             'events.subscribe' {
                 if ($subscribed) { throw 'Viewer subscribed a second time' }; $subscribed = $true
@@ -176,7 +187,7 @@ $serve = {
                     WriteFrame 0 0 ($utf8.GetBytes($errorReply)); continue messages
                 }
                 $targets.Remove('core-studio/t74')
-                WriteEvent @{ seq=85; type='finished'; terminal='studio/t74'; data=@{reason='killed'} }
+                WriteEvent @{ seq=86; type='finished'; terminal='studio/t74'; data=@{reason='killed'} }
                 WriteFrame $active 2 ($utf8.GetBytes('{"reason":"killed"}'))
                 $active = 0; $state.activeAddress = $null
                 $result = @{ address='studio/t74'; state='finished'; reason='killed' }
@@ -192,7 +203,6 @@ $serve = {
                         @{ id='sp2'; name='Personal'; tabs=@() }
                     }
                     'core-studio' { $work.name = $studioSpaceName; $work.tabs[0].name = 'remote twin'; $work }
-                    'core-extra' { }
                     default { throw 'Unexpected document target' }
                 }
                 $version = if ($request.params.on -ceq 'core-studio' -and $studioSpaceName -cne 'Work') { 2 } else { 1 }
@@ -223,8 +233,8 @@ $serve = {
     }
 }
 
-function FindId($id) {
-    $root.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, $id))
+function FindId($id, $within = $root) {
+    $within.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, $id))
 }
 function WaitFor($description, [scriptblock]$condition) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
@@ -239,6 +249,112 @@ function WaitFor($description, [scriptblock]$condition) {
 }
 function Pattern($id, $pattern) {
     (WaitFor $id { FindId $id }).GetCurrentPattern($pattern)
+}
+function SettingsButton {
+    $button = FindId SettingsButton
+    if ($button -and $button.Current.Name -ceq 'Settings' -and $button.Current.IsEnabled -and !$button.Current.IsOffscreen) { $button }
+}
+function FindSettings {
+    $windows = [AutomationElement]::RootElement.FindAll('Children', [AndCondition]::new(
+        [PropertyCondition]::new([AutomationElement]::ProcessIdProperty, $viewer.Id),
+        [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::Window),
+        [PropertyCondition]::new([AutomationElement]::NameProperty, 'Porchlight Settings')))
+    if ($windows.Count -gt 1) { throw 'More than one Settings window for this fixture' }
+    if ($windows.Count) {
+        $handle = [IntPtr]$windows[0].Current.NativeWindowHandle
+        if ($handle -eq [IntPtr]::Zero -or $handle -eq $hwnd) { throw 'Settings is not a separate window' }
+        $windows[0]
+    }
+}
+function OpenSettings {
+    (WaitFor 'enabled main window Settings button' { SettingsButton }).GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    $settings = WaitFor 'fixture Settings window' { FindSettings }
+    if ($settings.GetCurrentPattern([WindowPattern]::Pattern).Current.IsModal -or !$root.Current.IsEnabled) { throw 'Settings blocked the main window' }
+    if ($CheckFocus) {
+        [void](WaitFor 'active Settings window' { [PorchlightChrome]::GetForegroundWindow() -eq [IntPtr]$settings.Current.NativeWindowHandle })
+    }
+    $settings
+}
+function CloseSettings($settings) {
+    $settings.GetCurrentPattern([WindowPattern]::Pattern).Close()
+    [void](WaitFor 'Settings window to close' { !(FindSettings) })
+}
+function CheckNoGatewayControls($within) {
+    foreach ($id in 'CoreLabel','RefreshMachinesButton','PipePath') {
+        if (FindId $id $within) { throw "Obsolete gateway control: $id" }
+    }
+    if ($within.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::NameProperty, 'Gateway'))) { throw 'Obsolete Gateway section' }
+    $buttons = $within.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::Button))
+    foreach ($button in $buttons) {
+        if ($button.Current.Name -match '^(Refresh|Retry)\b') { throw "Obsolete action: $($button.Current.Name)" }
+    }
+}
+function CheckSettingsLayout($settings) {
+    $settingsHwnd = [IntPtr]$settings.Current.NativeWindowHandle
+    $original = $settings.Current.BoundingRectangle
+    $scale = [PorchlightChrome]::GetDpiForWindow($settingsHwnd) / 96.0
+    $expander = [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'Microsoft.UI.Xaml.Controls.Expander')
+    $fonts = [PropertyCondition]::new([AutomationElement]::NameProperty, 'Terminal fonts')
+    # Exercise a narrow window and the old capped layout. UIA Resize can drop the WinUI input-site subtree.
+    $narrow = 550
+    $paneWidths = foreach ($width in $narrow,1150) {
+        [PorchlightChrome]::Resize($settingsHwnd, $width * $scale, $original.Height)
+        WaitFor "expanded Terminal navigation and font page at $width DIPs" {
+            $window = $settings.Current.BoundingRectangle
+            if ([Math]::Abs($window.Width / $scale - $width) -gt 16) { return }
+            $nav = FindId Categories $settings
+            if (!$nav -or $nav.Current.Name -cne 'Settings categories') { return }
+            $category = FindId TerminalCategory $nav
+            if (!$category -or $category.Current.IsOffscreen -or $category.Current.Name -cnotlike '*Terminal*' -or
+                !$category.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected) { return }
+            $row = $category.Current.BoundingRectangle
+            if ($row.IsEmpty -or $row.Width -lt 120 * $scale -or $row.Left -lt $window.Left -or $row.Left -gt $window.Left + 40 * $scale) { return }
+            foreach ($id in 'TerminalPageHeading','TerminalPreviewSample','FontSettingsCard','TerminalFontPicker','ResetFontsButton') {
+                $control = FindId $id $settings
+                $r = $control.Current.BoundingRectangle
+                if (!$control -or $control.Current.IsOffscreen -or $r.IsEmpty -or $r.Left -lt $row.Right -or $r.Right -gt $window.Right) { return }
+                if ($id -eq 'TerminalPageHeading' -and ($control.Current.ControlType -ne [ControlType]::Text -or $control.Current.Name -cne 'Terminal' -or
+                    $control.GetCurrentPropertyValue([AutomationElement]::HeadingLevelProperty) -ne 'Level1')) { return }
+                # Wait for the wide page to lay out, not just for the outer HWND to change size.
+                if ($width -gt $narrow -and $id -eq 'ResetFontsButton' -and $r.Right -le $window.Left + $narrow * $scale) { return }
+            }
+            $sample = (FindId TerminalPreviewSample $settings).Current.BoundingRectangle
+            if ($sample.Top -lt (FindId TerminalPageHeading $settings).Current.BoundingRectangle.Bottom -or
+                $sample.Bottom -gt (FindId FontSettingsCard $settings).Current.BoundingRectangle.Top) { return }
+            $togglePane = FindId TogglePaneButton $nav
+            if ($togglePane -and !$togglePane.Current.IsOffscreen) { throw 'Settings navigation can be collapsed' }
+            $row.Width
+        }
+        CheckNoGatewayControls $settings
+        if ($settings.FindFirst('Descendants', [OrCondition]::new($expander, $fonts))) { throw 'Terminal fonts are behind an expander' }
+    }
+    if ([Math]::Abs($paneWidths[0] - $paneWidths[1]) -gt 2 * $scale) { throw 'Settings navigation width changed on resize' }
+    [PorchlightChrome]::Resize($settingsHwnd, $original.Width, $original.Height)
+}
+function CheckFontPicker($settings) {
+    $picker = WaitFor 'terminal font picker' {
+        $p = FindId TerminalFontPicker $settings
+        if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
+    }
+    $reset = WaitFor 'reset fonts button' { FindId ResetFontsButton $settings }
+    $sample = WaitFor 'terminal preview sample' { FindId TerminalPreviewSample $settings }
+    $text = $sample.GetCurrentPattern([TextPattern]::Pattern)
+    $launchFont = $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
+    $value = $picker.GetCurrentPattern([ValuePattern]::Pattern)
+    if ($value.Current.Value -or $reset.Current.IsEnabled) { throw 'Expected an empty picker inheriting the launch fonts' }
+
+    # The comma commits the name through the picker's own delimiter handling. No keyboard focus or injected keys.
+    $value.SetValue('consolas,')
+    $token = [PropertyCondition]::new([AutomationElement]::NameProperty, 'Consolas')
+    [void](WaitFor 'Consolas token and preview' {
+        $reset.Current.IsEnabled -and $picker.FindFirst('Descendants', $token) -and
+            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq 'Consolas'
+    })
+    $reset.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'reset to inherited fonts' {
+        !$reset.Current.IsEnabled -and !$value.Current.Value -and !$picker.FindFirst('Descendants', $token) -and
+            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq $launchFont
+    })
 }
 function ExpandGroup($machine, $expanded) {
     $id = "MachineGroup-$machine"; $pattern = [ExpandCollapsePattern]::Pattern
@@ -388,16 +504,16 @@ function CheckScope($machine, $space, $terminals, $address) {
     })
     if ($machine -eq 'core-studio' -and (SpacePattern core-local Work).Current.IsSelected) { throw 'Two spaces selected' }
 }
-function SelectSpace($machine, $space, $terminals, $address, [switch]$focusRefresh) {
+function SelectSpace($machine, $space, $terminals, $address, [switch]$focusSettings) {
     $selection = SpacePattern $machine $space
     if ($terminals.Count) { AuthorizeAttach $address }
     else { $state.expectDetach = [bool]$state.activeAddress } # Empty destination: CLOSE only if leaving a viewer.
     if ($CheckFocus) { (SpaceItem $machine $space).SetFocus() } # Start from the same focus owner as a sidebar click.
     $selection.Select()
-    if ($focusRefresh) { (FindId RefreshMachinesButton).SetFocus() } # The peer is still holding the old channel's CLOSE.
+    if ($focusSettings) { (FindId SettingsButton).SetFocus() } # The peer is still holding the old channel's CLOSE.
     CheckScope $machine $space $terminals $address
-    if ($focusRefresh) {
-        if (!(FindId RefreshMachinesButton).Current.HasKeyboardFocus) { throw 'The new terminal took focus back from Refresh.' }
+    if ($focusSettings) {
+        if (!(FindId SettingsButton).Current.HasKeyboardFocus) { throw 'The new terminal took focus back from Settings.' }
     } elseif ($CheckFocus -and $address) { CheckTerminalFocus $address }
 }
 function CheckLocalOrder {
@@ -434,8 +550,6 @@ function CommitTerminal($terminals, $address) {
 }
 
 function CheckMachineSpaces {
-    $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
-    if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
     CheckScope core-local Work $localWork $startupTerminal # No manual tab selection at launch.
     if ($MeasureSwitchTabs) {
         # Time selection to the first laid-out destination header, including UI Automation overhead.
@@ -475,11 +589,17 @@ function CheckMachineSpaces {
     CheckNoAttachButtons; CheckLocalOrder
     [void](WaitFor 'full-height windowed caption buttons' { CaptionFits 40 })
     if ((FindId WindowLabel) -or (FindId ScopeLabel)) { throw 'Duplicate title or machine/space label in the title bar' }
-    if (!(IsExpanded core-local) -or !(IsExpanded core-studio)) { throw 'Machines must start expanded' }
+    if (!(IsExpanded core-local) -or !(IsExpanded core-studio) -or !(IsExpanded core-extra)) { throw 'Machines must start expanded' }
     if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Missing accessible machine name or state' }
-    if ((FindId CoreLabel).Current.Name -cne 'HerdR smoke · core core-local') { throw 'Missing gateway identity' }
-    if (FindId StateLabel) { throw 'Connected machines should not have a state caption' }
-    if (FindId PipePath) { throw 'The main pane still contains a pipe editor' }
+    CheckNoGatewayControls $root
+    foreach ($id in 'MachineGroup-core-local','MachineGroup-core-studio') {
+        if (FindId StateLabel (FindId $id)) { throw 'Connected machines should not have a state caption' }
+    }
+    $extra = FindId MachineGroup-core-extra
+    if ($extra.Current.Name -cne 'extra, needs login' -or (FindId StateLabel $extra).Current.Name -cne 'needs login') {
+        throw 'Missing unavailable machine or specific reason'
+    }
+    ExpandGroup core-extra $false
     foreach ($expanded in $false,$true) {
         ExpandGroup core-studio $expanded; CheckScope core-local Work $localWork $startupTerminal
     }
@@ -490,8 +610,21 @@ function CheckMachineSpaces {
     SelectSpace core-local Personal $personal t75
     # These headers round in opposite directions at 200% DPI. UIA includes the visible corner in the tab bounds.
     [void](WaitFor 'ScopeJobs tab corner at the workspace edge' { TabsInCaption $personal.t75 })
-    $state.catalogEdit = 'retitle'
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
+    $settings = OpenSettings
+    CheckScope core-local Personal $personal t75
+    CheckSettingsLayout $settings
+    CheckFontPicker $settings
+    if ($CheckFocus) {
+        [void](WaitFor 'main window active with Settings open' {
+            [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
+        })
+    }
+    $again = OpenSettings
+    if ($again.Current.NativeWindowHandle -ne $settings.Current.NativeWindowHandle) { throw 'Settings opened a different window' }
+    CloseSettings $settings
+    CheckScope core-local Personal $personal t75
+
+    $state.catalogEdit.SetResult('retitle')
     $personal.t75 = 't75 · π - Porchlight'
     CheckScope core-local Personal $personal t75
     [void](WaitFor 'same leading corner after the selected tab is retitled' { TabsInCaption $personal.t75 })
@@ -545,24 +678,16 @@ function CheckMachineSpaces {
     if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Minimizing can collapse the sidebar.
 
     SelectSpace core-studio Work $remoteWork core-studio/t74
-    ExpandGroup core-local $false
-    $state.extraMachineState = 'needs_login'
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'unavailable machine with a specific reason' {
-        (FindId MachineGroup-core-extra).Current.Name -ceq 'extra, needs login' -and (FindId StateLabel).Current.Name -ceq 'needs login'
-    })
-    if (!(IsExpanded core-extra) -or (IsExpanded core-local)) { throw 'Refresh reset expansion state' }
-    ExpandGroup core-local $true; CheckScope core-studio Work $remoteWork core-studio/t74; CheckLocalOrder
     CommitTerminal $remoteWork core-studio/t76
     # The local startup choice is independent of studio's t76. Browse left no remembered tab.
     SelectSpace core-local Work $localWork ($startupTerminal ?? 't74')
     if ($startupTerminal -ceq 't76') { CommitTerminal $localWork t74 }
     [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork.t74 })
     $localWork.t74 = 't74 · local twin · Git Changes'; $localWork.t73 = 't73 · new sibling'
-    $state.extraMachineState = $null; $state.catalogEdit = 'insert'
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'removed extra machine' { !(FindId MachineGroup-core-extra) })
+    $state.catalogEdit.SetResult('insert')
     CheckScope core-local Work $localWork t74 # Inserted t73 and renamed t74; no new viewer.
+    if (IsExpanded core-extra) { throw 'Catalog update reset machine expansion' }
+    CheckLocalOrder
     CommitTerminal $localWork t76
     CommitTerminal $localWork t74
     CheckNoAttachButtons
@@ -570,7 +695,7 @@ function CheckMachineSpaces {
     # Remember non-first tabs independently, including the null space ID and two cores with identical sp1/t74/t76 IDs.
     SelectSpace core-local Unassigned $unassigned t77
     CommitTerminal $unassigned t78
-    SelectSpace core-local Work $localWork t74 -focusRefresh:$CheckFocus
+    SelectSpace core-local Work $localWork t74 -focusSettings:$CheckFocus
     SelectSpace core-local Unassigned $unassigned t78
     SelectSpace core-local Archive @{} # The active viewer must detach, without attaching a neighbor.
     SelectSpace core-studio Work $remoteWork core-studio/t76
@@ -578,9 +703,7 @@ function CheckMachineSpaces {
     CommitTerminal $localWork t76
     SelectSpace core-studio Work $remoteWork core-studio/t76 # Same terminal ID, different viewer/route.
 
-    $state.extraMachineState = 'connected'; $state.catalogEdit = 'finish-hidden'
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'original gateway still connected after leaving the space' { FindId MachineGroup-core-extra })
+    $state.catalogEdit.SetResult('finish-hidden')
     CheckScope core-studio 'Renamed Work' $remoteWork core-studio/t76 # Same viewer through the sidebar rename.
     # Even a reused strip must drop finished local t76 and show t74's new title. Fall back to first live t73.
     $localWork.Remove('t76'); $localWork.t74 = 't74 · local twin · pwsh'
@@ -622,7 +745,7 @@ function RunFixture([switch]$Instant, $Baseline) {
     # Bind before starting the viewer. One hello and one subscription on this pipe; no real core or program.
     $name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
     $pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
-    $state = [hashtable]::Synchronized(@{ extraMachineState=$null; catalogEdit=$null; closing=$false; expectDetach=$false
+    $state = [hashtable]::Synchronized(@{ catalogEdit=[Threading.Tasks.TaskCompletionSource[string]]::new(); closing=$false; expectDetach=$false
         nextTerminal=$null; activeAddress=$null; resizeCount=0; columns=0; paintCells=$CheckSidebarPixels.IsPresent; measureTabs=$MeasureSwitchTabs; deferLocalLayout=($Startup -eq 'Select') })
     $viewer = $peer = $root = $null
     try {
@@ -638,6 +761,10 @@ function RunFixture([switch]$Instant, $Baseline) {
         $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
         $root = [AutomationElement]::FromHandle($hwnd)
         if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
+        $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
+        if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
+        [void](WaitFor 'Settings available before the gateway hello' { SettingsButton })
+        CheckNoGatewayControls $root
         if ($CheckFocus) {
             # Allow startup auto-selection only after the fixture owns keyboard focus, not in a background window.
             [void](WaitFor 'foreground fixture window for keyboard focus checks' {

@@ -19,8 +19,11 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Porchlight.Core/Porchlight.Core.csproj" />
+    <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.251219" />
+    <PackageReference Include="CommunityToolkit.WinUI.Controls.TokenizingTextBox" Version="8.2.251219" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
     <PackageReference Include="XamlToolkit.WinUI.Terminal" Version="0.1.0-alpha" />
-    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="1.8.260710003" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260710003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
   </ItemGroup>
   <Target Name="BuildNativeFeatureMap" BeforeTargets="CopyFilesToOutputDirectory"

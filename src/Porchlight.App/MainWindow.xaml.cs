@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Animation;
 using Porchlight.Core;
@@ -13,12 +12,12 @@ public sealed partial class MainWindow : Window
     readonly CancellationTokenSource lifetime = new();
     readonly SpaceTabMemory spaceTabs = new();
     LaunchOptions options = new();
-    CoreEndpoint? endpoint;
     CoreSession? session;
+    SettingsWindow? settingsWindow;
     HerdMachine? selectedMachine;
     TerminalSpace? selectedSpace;
     Task? connecting;
-    bool configured, busy, closing, mayClose, active, updatingSelection, startupPending;
+    bool busy, closing, mayClose, active, updatingSelection, startupPending;
     string? viewerNotice;
 
     public MainWindow()
@@ -32,7 +31,7 @@ public sealed partial class MainWindow : Window
             if (mayClose) return;
             e.Cancel = true;
             if (closing) return;
-            closing = true; Controls(); lifetime.Cancel();
+            closing = true; settingsWindow?.Close(); Controls(); lifetime.Cancel();
             RequestViewer(null);
             await Task.Yield(); // leave this synchronous cancellable event before calling Close
             var stop = session?.DisposeAsync().AsTask();
@@ -57,8 +56,8 @@ public sealed partial class MainWindow : Window
                 PaneHost.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, bg.R, bg.G, bg.B));
             }
             else if (options.ImportedFont) Title = "Porchlight · Windows Terminal font";
-            configured = true;
-            Connect();
+            var endpoint = options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
+            connecting = ConnectTo(endpoint);
         }
         catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -77,17 +76,6 @@ public sealed partial class MainWindow : Window
         _ => "Cannot connect to the configured gateway."
     };
 
-    void Connect()
-    {
-        if (!configured || busy || closing || session != null) return;
-        try
-        {
-            endpoint ??= options.Pipe == null ? CoreEndpoint.Discover() : CoreEndpoint.Select(options.Pipe);
-            connecting = ConnectTo(endpoint);
-        }
-        catch (Exception ex) { ShowStatus(SetupMessage(ex)); Controls(); }
-    }
-
     async Task ConnectTo(CoreEndpoint endpoint)
     {
         busy = true; Controls();
@@ -97,7 +85,6 @@ public sealed partial class MainWindow : Window
             var s = await CoreSession.ConnectAsync(endpoint, lifetime.Token);
             if (closing) { await s.DisposeAsync(); return; }
             session = s;
-            CoreLabel.Text = $"HerdR {s.Identity.Version} · core {s.Identity.Id}";
             s.CatalogChanged += () => DispatcherQueue.TryEnqueue(() => RefreshList(s));
             RefreshList(s, initial: true);
             _ = WatchGateway(s);
@@ -288,9 +275,15 @@ public sealed partial class MainWindow : Window
         ShowScope(catalog, machine, space, enterSpace: true);
     }
 
-    void RefreshMachines_Click(object sender, RoutedEventArgs e)
+    void OpenSettings(object sender, RoutedEventArgs e)
     {
-        if (session == null) Connect(); else session.RefreshMachines();
+        if (closing) return;
+        if (settingsWindow == null)
+        {
+            settingsWindow = new SettingsWindow(this, options.Font.Face);
+            settingsWindow.Closed += (_, _) => settingsWindow = null;
+        }
+        settingsWindow.Activate();
     }
 
     void TerminalSelected(object sender, SelectionChangedEventArgs e)
@@ -306,18 +299,14 @@ public sealed partial class MainWindow : Window
     {
         if (requested != null || session == null || closing) return;
         ShowStatus(startupPending ? "" : viewerNotice ?? (selectedMachine is { Available: false } m
-            ? $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines." : ""));
+            ? $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then reopen Porchlight." : ""));
     }
     void Controls()
     {
-        if (TerminalTabs == null || RefreshMachinesButton == null) return;
+        if (TerminalTabs == null || SettingsButton == null) return;
         bool idle = !busy && !closing;
-        CoreLabel.Visibility = session == null ? Visibility.Collapsed : Visibility.Visible;
+        SettingsButton.IsEnabled = !closing;
         MachineBrowser.IsEnabled = idle && session != null;
-        RefreshMachinesButton.IsEnabled = idle && configured && (session == null || session.SupportsMachineList);
-        var refresh = session == null ? "Retry gateway connection" : "Refresh machines";
-        AutomationProperties.SetName(RefreshMachinesButton, refresh);
-        ToolTipService.SetToolTip(RefreshMachinesButton, refresh);
         TerminalTabs.IsEnabled = MachineBrowser.IsEnabled && selectedMachine is { Available: true };
     }
 
