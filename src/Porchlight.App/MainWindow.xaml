@@ -86,21 +86,22 @@
           <ScrollViewer x:Name="MachineBrowser" AutomationProperties.Name="Machines" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="MachineGroups" Spacing="6" />
           </ScrollViewer>
-          <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
-            <TextBlock x:Name="CoreLabel" VerticalAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}"
+          <Grid Grid.Row="1" RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <TextBlock x:Name="Status" Grid.ColumnSpan="2" Margin="0,0,0,8" Visibility="Collapsed" TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite" />
+            <TextBlock x:Name="CoreLabel" Grid.Row="1" VerticalAlignment="Center" Style="{ThemeResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-            <Button x:Name="RefreshMachinesButton" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}" Click="RefreshMachines_Click">
+            <Button x:Name="RefreshMachinesButton" Grid.Row="1" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}" Click="RefreshMachines_Click">
               <FontIcon Glyph="&#xE72C;" FontSize="16" />
             </Button>
           </Grid>
         </Grid>
       </SplitView.Pane>
 
-      <Grid x:Name="WorkspaceFrame" AutomationProperties.Name="Terminal workspace"
-            Padding="4" RowDefinitions="Auto,*" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
-        <TextBlock x:Name="Status" Visibility="Collapsed" Margin="0,0,0,8" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
-        <Border x:Name="PaneHost" Grid.Row="1" Background="#282c34" CornerRadius="4" />
-      </Grid>
+      <Border x:Name="WorkspaceFrame" AutomationProperties.Name="Terminal workspace"
+              Padding="4" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
+        <Border x:Name="PaneHost" Background="#282c34" CornerRadius="4" />
+      </Border>
     </SplitView>
   </Grid>
 </Window>

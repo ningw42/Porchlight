@@ -238,12 +238,8 @@ public sealed partial class MainWindow : Window
     void SelectionStatus()
     {
         if (requested != null || session == null || closing) return;
-        ShowStatus(startupPending ? "" : viewerNotice ?? (selectedMachine switch {
-            { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
-            { } m when selectedSpace == null && session.Directory.SpacesFor(m).Count == 0 => "No live terminals on this machine.",
-            _ when selectedSpace != null && shownTabs.Length == 0 => "No live terminals in this space.",
-            _ => ""
-        }));
+        ShowStatus(startupPending ? "" : viewerNotice ?? (selectedMachine is { Available: false } m
+            ? $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines." : ""));
     }
     void Controls()
     {

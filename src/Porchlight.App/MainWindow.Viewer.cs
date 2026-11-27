@@ -32,7 +32,9 @@ public sealed partial class MainWindow
 
     async Task ChangeViewer(Task previous, long version, CoreSession? gateway, Target? target)
     {
-        await Task.Yield(); // leave tab selection dispatch before replacing native content
+        await Task.Yield(); // let selection and its focus change settle before replacing native content
+        var selectionFocus = version == revision && target != null && PaneHost.XamlRoot is { } root
+            ? FocusManager.GetFocusedElement(root) : null;
         await previous;
         if (version != revision) return;
         try
@@ -44,7 +46,7 @@ public sealed partial class MainWindow
             var terminal = machine != null && selectedSpace != null && selectedMachine?.Id == machine.Id ?
                 directory.TerminalsIn(machine, selectedSpace).FirstOrDefault(t => t.Address == target.Address) : null;
             if (terminal == null) throw new CoreException("That terminal or space is no longer available. Choose a live terminal.");
-            MountPane(gateway, target, terminal.Label, version);
+            MountPane(gateway, target, terminal.Label, version, selectionFocus);
         }
         catch (Exception ex)
         {
@@ -55,7 +57,7 @@ public sealed partial class MainWindow
         }
     }
 
-    void MountPane(CoreSession gateway, Target target, string label, long version)
+    void MountPane(CoreSession gateway, Target target, string label, long version, object? selectionFocus)
     {
         var font = options.Font;
         var settings = new TerminalSettings(options.Scheme) {
@@ -94,7 +96,9 @@ public sealed partial class MainWindow
             {
                 AutomationProperties.SetName(PaneHost, TerminalTabs.SelectedItem is TabViewItem tab ? AutomationProperties.GetName(tab) : label);
                 ShowStatus();
-                if (active && FocusManager.GetFocusedElement(control.XamlRoot) is null or TabViewItem)
+                // Hand focus from the space or tab to its terminal unless the user moved elsewhere while switching.
+                var focused = FocusManager.GetFocusedElement(control.XamlRoot);
+                if (active && (focused == selectionFocus || focused is null || focused == TerminalTabs.SelectedItem))
                     control.Focus(FocusState.Programmatic);
             }
             var end = await bridge.Completion;

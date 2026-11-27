@@ -4,7 +4,7 @@ using namespace System.Windows.Automation
 using namespace System.IO.Pipes
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$Exe, [ValidateRange(0,96)][int]$MeasureSwitchTabs = 0,
-    [ValidateSet('Default','Select','Browse')][string]$Startup = 'Default')
+    [ValidateSet('Default','Select','Browse')][string]$Startup = 'Default', [switch]$CheckFocus)
 $ErrorActionPreference = 'Stop'
 $exePath = (Get-Item -LiteralPath $Exe).FullName
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -14,6 +14,8 @@ using System;
 using System.Runtime.InteropServices;
 public static class PorchlightChrome {
     [DllImport("user32")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32")] static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     public static int Hit(IntPtr hwnd, int x, int y) =>
         (int)SendMessage(hwnd, 0x0084, IntPtr.Zero, (IntPtr)((x & 0xffff) | (y << 16)));
@@ -249,6 +251,11 @@ function StatusHidden {
     $status = FindId Status
     !$status -or $status.Current.IsOffscreen
 }
+function SidebarStatus {
+    $status = FindId Status
+    if ($status -and !$status.Current.IsOffscreen -and !$status.Current.BoundingRectangle.IsEmpty -and
+        $status.Current.BoundingRectangle.Right -le (FindId WorkspaceFrame).Current.BoundingRectangle.Left) { $status.Current.Name }
+}
 function TabsInCaption($firstTabLabel) {
     $strip = FindId TerminalTabs
     $tabs = $strip.Current.BoundingRectangle
@@ -324,22 +331,35 @@ function PaneMatches($address, $label) {
     !$state.nextTerminal -and !$state.expectDetach -and [string]$state.activeAddress -ceq [string]$address -and
         [string](FindId PaneHost).Current.Name -ceq [string]$label
 }
+function CheckTerminalFocus($address) {
+    [void](WaitFor "keyboard focus in the native pane for $address" {
+        $hostPane = FindId PaneHost
+        if ($hostPane -and $state.activeAddress -ceq $address) {
+            $pane = $hostPane.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
+            $pane -and $pane.Current.HasKeyboardFocus
+        }
+    })
+}
 function CheckScope($machine, $space, $terminals, $address) {
     $label = if ($address) { $terminals[$address] } else { '' }
     [void](WaitFor "$machine / $space, tabs [$($terminals.Values -join ', ')], viewer '$address'" {
         $item = SpaceItem $machine $space
-        $statusOk = if ($terminals.Count) { StatusHidden } else { (FindId Status).Current.Name -ceq 'No live terminals in this space.' }
-        $statusOk -and $item -and $item.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
+        (StatusHidden) -and $item -and $item.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
             (TabsMatch $terminals.Values $label) -and (PaneMatches $address $label)
     })
     if ($machine -eq 'core-studio' -and (SpacePattern core-local Work).Current.IsSelected) { throw 'Two spaces selected' }
 }
-function SelectSpace($machine, $space, $terminals, $address) {
+function SelectSpace($machine, $space, $terminals, $address, [switch]$focusRefresh) {
     $selection = SpacePattern $machine $space
     if ($terminals.Count) { AuthorizeAttach $address }
     else { $state.expectDetach = [bool]$state.activeAddress } # Empty destination: CLOSE only if leaving a viewer.
+    if ($CheckFocus) { (SpaceItem $machine $space).SetFocus() } # Start from the same focus owner as a sidebar click.
     $selection.Select()
+    if ($focusRefresh) { (FindId RefreshMachinesButton).SetFocus() } # The peer is still holding the old channel's CLOSE.
     CheckScope $machine $space $terminals $address
+    if ($focusRefresh) {
+        if (!(FindId RefreshMachinesButton).Current.HasKeyboardFocus) { throw 'The new terminal took focus back from Refresh.' }
+    } elseif ($CheckFocus -and $address) { CheckTerminalFocus $address }
 }
 function CheckLocalOrder {
     $items = (FindId Spaces-core-local).FindAll('Children', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem))
@@ -360,7 +380,7 @@ function CommitTerminal($terminals, $address) {
     $selection = $item.GetCurrentPattern([SelectionItemPattern]::Pattern)
     AuthorizeAttach $address
     $selection.Select()
-    if (!(StatusHidden)) { throw "Unexpected workspace notice while switching to $label" }
+    if (!(StatusHidden)) { throw "Unexpected notice while switching to $label" }
     [void](WaitFor "selected and attached $label" {
         (TabsMatch $terminals.Values $label) -and (PaneMatches $address $label) -and (StatusHidden)
     })
@@ -375,7 +395,6 @@ function CommitTerminal($terminals, $address) {
 }
 
 try {
-    $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
     $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
     $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
     $start.ArgumentList.Add("--pipe=\\.\pipe\$name")
@@ -387,6 +406,14 @@ try {
     $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
     $root = [AutomationElement]::FromHandle($hwnd)
     if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
+    if ($CheckFocus) {
+        # Allow startup auto-selection only after the fixture owns keyboard focus, not in a background window.
+        [void](WaitFor 'foreground fixture window for keyboard focus checks' {
+            [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
+        })
+    }
+    $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
+    if ($CheckFocus -and $startupTerminal) { CheckTerminalFocus $startupTerminal } # No click or tab switch at launch.
     $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
     CheckScope core-local Work $localWork $startupTerminal # No manual tab selection at launch.
@@ -518,7 +545,7 @@ try {
     # Remember non-first tabs independently, including the null space ID and two cores with identical sp1/t74/t76 IDs.
     SelectSpace core-local Unassigned $unassigned t77
     CommitTerminal $unassigned t78
-    SelectSpace core-local Work $localWork t74
+    SelectSpace core-local Work $localWork t74 -focusRefresh:$CheckFocus
     SelectSpace core-local Unassigned $unassigned t78
     SelectSpace core-local Archive @{} # The active viewer must detach, without attaching a neighbor.
     SelectSpace core-studio Work $remoteWork core-studio/t76
@@ -544,14 +571,14 @@ try {
     $state.refuseClose = $true; $state.allowRemoteClose = $true
     $glyph.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
     [void](WaitFor 'refused close kept the terminal and its viewer' {
-        !$state.allowRemoteClose -and (FindId Status).Current.Name -like 'Could not confirm closing studio/t74.*' -and
+        !$state.allowRemoteClose -and (SidebarStatus) -like 'Could not confirm closing studio/t74.*' -and
         (PaneMatches core-studio/t74 $remoteLabel) -and (TabsMatch $remoteWork.Values $remoteLabel)
     })
     $state.allowRemoteClose = $true
     $glyph.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
     [void](WaitFor 'remote terminal closed without closing the window or attaching its sibling' {
         !$state.allowRemoteClose -and (PaneMatches $null '') -and (TabsMatch $remoteWork['core-studio/t76'] '') -and
-            (FindId Status).Current.Name -ceq 'Program killed.'
+            (SidebarStatus) -ceq 'Program killed.'
     })
     SelectSpace core-local Work $localWork t73
     $state.closing = $true
