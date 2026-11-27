@@ -10,6 +10,7 @@ public sealed partial class MainWindow : Window
 {
     sealed record Target(string MachineId, string Address);
     readonly CancellationTokenSource lifetime = new();
+    readonly SpaceTabMemory spaceTabs = new();
     LaunchOptions options = new();
     CoreEndpoint? endpoint;
     CoreSession? session;
@@ -140,7 +141,7 @@ public sealed partial class MainWindow : Window
         ShowScope(catalog, machine, space);
     }
 
-    void ShowScope(MachineDirectory catalog, HerdMachine? machine, TerminalSpace? space)
+    void ShowScope(MachineDirectory catalog, HerdMachine? machine, TerminalSpace? space, bool enterSpace = false)
     {
         updatingSelection = true;
         try
@@ -148,6 +149,12 @@ public sealed partial class MainWindow : Window
             selectedMachine = machine; selectedSpace = space;
             ShowMachineGroups(catalog);
             var items = machine != null && space != null ? catalog.TerminalsIn(machine, space) : [];
+            if (enterSpace)
+            {
+                // A deliberate sidebar switch hands off the viewer; a catalog repaint never does.
+                RequestViewer(machine != null && space != null && spaceTabs.Enter(machine, space, items) is { } address
+                    ? new(machine.Id, address) : null);
+            }
             ShowTerminalTabs(machine, items);
         }
         finally { updatingSelection = false; }
@@ -187,8 +194,7 @@ public sealed partial class MainWindow : Window
         var machine = catalog.Machines.FirstOrDefault(m => m.Id == group.Machine.Id);
         var space = machine != null && group.SelectedSpace is { } pick ? catalog.SpacesFor(machine).FirstOrDefault(s => s.Id == pick.Id) : null;
         suggested = null; viewerNotice = null; userChoseScope = true;
-        RequestViewer(null); // release the old pane, not the catalog connection or the program
-        ShowScope(catalog, machine, space);
+        ShowScope(catalog, machine, space, enterSpace: true);
     }
 
     void RefreshMachines_Click(object sender, RoutedEventArgs e)
@@ -199,8 +205,9 @@ public sealed partial class MainWindow : Window
     void TerminalSelected(object sender, SelectionChangedEventArgs e)
     {
         if (updatingSelection || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
-            TerminalTabs.SelectedItem is not TabViewItem { Tag: Target target } || target.MachineId != machine.Id) return;
+            selectedSpace is not { } space || TerminalTabs.SelectedItem is not TabViewItem { Tag: Target target } || target.MachineId != machine.Id) return;
         suggested = null; viewerNotice = null; userChoseScope = true;
+        spaceTabs.Remember(machine, space, target.Address);
         RequestViewer(target);
     }
 

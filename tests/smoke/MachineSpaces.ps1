@@ -24,8 +24,8 @@ public static class PorchlightChrome {
 # Bind before starting the viewer. One hello and one subscription on this pipe; no real core or program.
 $name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
 $pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
-$state = [hashtable]::Synchronized(@{ refresh=$false; closing=$false; leavingSpace=$false; nextTerminal=$null; attaches=0; switchAcks=0 })
-$state.measureTabs = $MeasureSwitchTabs
+$state = [hashtable]::Synchronized(@{ extraMachine=$false; catalogEdit=$null; closing=$false; expectDetach=$false
+    nextTerminal=$null; activeAddress=$null; measureTabs=$MeasureSwitchTabs })
 $viewer = $peer = $root = $null
 $serve = {
     param($pipe, $state)
@@ -37,13 +37,24 @@ $serve = {
     function WriteFrame([uint32]$channel, [byte]$kind, [byte[]]$bytes) {
         $writer.Write($channel); $writer.Write($kind); $writer.Write($bytes.Length); $writer.Write($bytes)
     }
-    $eventChannel = 9
-    $attachChannels = @(41, 53, 67, 79) # Fresh even when reattaching the first fixture.
+    function WriteEvent($e) {
+        $event = @{ method='event'; params=$e } | ConvertTo-Json -Depth 8 -Compress
+        WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
+    }
+    $eventChannel = 9; $nextChannel = 41; $studioSpaceName = 'Work'
     $targets = @{
         t74 = @{ address='t74'; name='local twin'; state='live'; argv=@('pwsh.exe'); cwd='C:\fixture\launch'; foreground=@{cwd='C:\fixture\Work\src'} }
+        t75 = @{ address='t75'; name='personal terminal'; state='live'; labels=@{'herdr.space'='sp2'} }
         t76 = @{ address='t76'; name='work sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
+        t77 = @{ address='t77'; name='loose first'; state='live' }
+        t78 = @{ address='t78'; name='loose second'; state='live' }
         'core-studio/t74' = @{ address='studio/t74'; name='remote twin'; state='live' }
+        'core-studio/t76' = @{ address='studio/t76'; name='remote sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
     }
+    foreach ($group in 1,2) { for ($i = 0; $i -lt $state.measureTabs; ++$i) {
+        $id = 't{0}{1:d2}' -f $group,$i
+        $targets[$id] = @{ address=$id; name="Tab $i"; state='live'; labels=@{'herdr.space'="bench-$group"} }
+    } }
     $pipe.WaitForConnection()
     $reader = [IO.BinaryReader]::new($pipe, $utf8, $true)
     $writer = [IO.BinaryWriter]::new($pipe, $utf8, $true)
@@ -63,10 +74,10 @@ $serve = {
         $read = $pipe.ReadAsync($header, 0, $header.Length)
         if ($holdingClose -and !$read.Wait([Math]::Max(0, 500 - [int]$holdingClose.ElapsedMilliseconds))) {
             WriteFrame $active 2 ([byte[]]@())
-            $active = 0; $holdingClose = $null; $state.switchAcks++
+            $active = 0; $state.activeAddress = $null; $holdingClose = $null
         }
         $got = $read.GetAwaiter().GetResult()
-        if (!$got) { if ($state.closing) { return }; throw 'Viewer disconnected from the original fixture pipe' }
+        if (!$got) { if ($state.closing -and !$active) { return }; throw "Unexpected disconnect (active channel: $active)" }
         $pipe.ReadExactly($header, $got, $header.Length - $got)
         $channel = [BitConverter]::ToUInt32($header, 0); $kind = $header[4]; $n = [BitConverter]::ToUInt32($header, 5)
         if ($n -gt 4096) { throw "Oversized fixture frame ($n bytes)" }
@@ -79,8 +90,10 @@ $serve = {
                 1 { if ($n -ne 4) { throw 'Invalid terminal credit' } }
                 2 {
                     if ($n -or $holdingClose) { throw "Expected one empty CLOSE on channel $active" }
-                    if ($state.closing -or $state.leavingSpace) { WriteFrame $active 2 ([byte[]]@()); $active = 0; $state.leavingSpace = $false }
-                    elseif ($state.nextTerminal) { $holdingClose = [Diagnostics.Stopwatch]::StartNew() }
+                    if ($state.closing -or $state.expectDetach) {
+                        WriteFrame $active 2 ([byte[]]@())
+                        $active = 0; $state.activeAddress = $null; $state.expectDetach = $false
+                    } elseif ($state.nextTerminal) { $holdingClose = [Diagnostics.Stopwatch]::StartNew() }
                     else { throw "Unrequested CLOSE on channel $active" }
                 }
                 3 { if ($n -ne 4) { throw 'Invalid terminal resize' } }
@@ -91,50 +104,47 @@ $serve = {
         }
         if ($kind -ne 0) { throw "Unexpected RPC frame kind $kind" }
         $request = $utf8.GetString($body) | ConvertFrom-Json
-        if ($state.switchesOnly) { throw "Space selection issued an RPC: $($request.method)" }
+        if ($state.switchesOnly -and $request.method -cne 'terminal.attach') { throw "Unexpected benchmark RPC: $($request.method)" }
         switch -CaseSensitive ($request.method) {
             'machine.list' {
                 $machines = @(@{ id='core-studio'; name='studio'; state='connected' })
-                if ($state.refresh) { $machines += @{ id='core-extra'; name='extra'; state='connected' } }
+                if ($state.extraMachine) { $machines += @{ id='core-extra'; name='extra'; state='connected' } }
                 $result = @{ machines=$machines }
-                if ($state.updateHidden) {
-                    $state.updateHidden = $false
-                    foreach ($e in @(@{seq=83; type='finished'; terminal='t73'}, @{seq=84; type='foreground'; terminal='t74'; data=@{argv=@('pwsh.exe'); cwd='C:\fixture\Work\src'}})) {
-                        $event = @{ method='event'; params=$e } | ConvertTo-Json -Depth 8 -Compress
-                        WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
+                switch ($state.catalogEdit) {
+                    'insert' {
+                        if ($state.activeAddress -cne 't74') { throw 'Expected the local twin during catalog insertion' }
+                        # Insert before the selected tab; preserve its address, not its index.
+                        $targets.t73 = @{ address='t73'; name='new sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
+                        WriteEvent @{ seq=81; type='created'; terminal='t73'; data=$targets.t73 }
+                        $targets.t74.foreground = @{argv=@('C:\tools\lazygit.exe'); cwd='C:\fixture\Work\src'}
+                        WriteEvent @{ seq=82; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
+                    }
+                    'finish-hidden' {
+                        if ($state.activeAddress -cne 'core-studio/t76') { throw 'Expected the remote t76 while local t76 finishes' }
+                        $targets.Remove('t76')
+                        WriteEvent @{ seq=83; type='finished'; terminal='t76' }
+                        $targets.t74.foreground = @{argv=@('pwsh.exe'); cwd='C:\fixture\Work\src'}
+                        WriteEvent @{ seq=84; type='foreground'; terminal='t74'; data=$targets.t74.foreground }
+                        $studioSpaceName = 'Renamed Work' # Same core and space ID in the next doc.get.
                     }
                 }
-                if ($active) {
-                    # Insert a tab before the selected one; its address, not its index, must stay selected.
-                    $newTab = @{ address='t73'; name='new sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
-                    $event = @{ method='event'; params=@{ seq=81; type='created'; terminal='t73'; data=$newTab } } | ConvertTo-Json -Depth 8 -Compress
-                    WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
-                    $fg = @{ argv=@('C:\tools\lazygit.exe'); cwd='C:\fixture\Work\src' }
-                    $event = @{ method='event'; params=@{ seq=82; type='foreground'; terminal='t74'; data=$fg } } | ConvertTo-Json -Depth 8 -Compress
-                    WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
-                }
+                $state.catalogEdit = $null
             }
             'events.subscribe' {
                 if ($subscribed) { throw 'Viewer subscribed a second time' }; $subscribed = $true
-                $result = @{ channel=$eventChannel; seq=80; terminals=@(
-                    $targets.t74; $targets.t76
-                    @{ address='t75'; name='personal terminal'; state='live'; labels=@{'herdr.space'='sp2'} }
-                    $targets.'core-studio/t74'
-                    foreach ($group in 1,2) { for ($i = 0; $i -lt $state.measureTabs; ++$i) {
-                        @{ address=('t{0}{1:d2}' -f $group,$i); name="Tab $i"; state='live'; labels=@{'herdr.space'="bench-$group"} }
-                    } }) }
+                $result = @{ channel=$eventChannel; seq=80; terminals=@($targets.Values) }
             }
             'terminal.attach' {
                 $address = $request.params.terminal
                 if ($active) { throw "Attach to $address before empty CLOSE acknowledgement on channel $active" }
                 if (!$subscribed -or !$state.nextTerminal -or $address -cne $state.nextTerminal -or !$targets.ContainsKey($address)) {
-                    throw "Unexpected terminal.attach: $address (authorized tab selection: '$($state.nextTerminal)')"
+                    throw "Unexpected terminal.attach: $address (authorized selection: '$($state.nextTerminal)')"
                 }
-                $active = $attachChannels[$state.attaches]; $state.attaches++; $state.nextTerminal = $null
+                $active = $nextChannel++; $state.activeAddress = $address; $state.nextTerminal = $null
                 $result = @{ channel=$active; terminal=$targets[$address] }
             }
             'terminal.kill' {
-                if (!$state.allowRemoteClose -or $request.params.terminal -cne 'core-studio/t74' -or $active -ne 79) {
+                if (!$state.allowRemoteClose -or $request.params.terminal -cne 'core-studio/t74' -or !$active -or $state.activeAddress -cne $request.params.terminal) {
                     throw "Unexpected terminal.kill: $($request.params.terminal)"
                 }
                 $state.allowRemoteClose = $false
@@ -143,10 +153,10 @@ $serve = {
                     $errorReply = @{ jsonrpc='2.0'; id=$request.id; error=@{code=-32000; message='fixture refusal'} } | ConvertTo-Json -Compress
                     WriteFrame 0 0 ($utf8.GetBytes($errorReply)); continue messages
                 }
-                $event = @{ method='event'; params=@{ seq=85; type='finished'; terminal='studio/t74'; data=@{reason='killed'} } } | ConvertTo-Json -Depth 8 -Compress
-                WriteFrame $eventChannel 0 ($utf8.GetBytes("$event`n"))
+                $targets.Remove('core-studio/t74')
+                WriteEvent @{ seq=85; type='finished'; terminal='studio/t74'; data=@{reason='killed'} }
                 WriteFrame $active 2 ($utf8.GetBytes('{"reason":"killed"}'))
-                $active = 0
+                $active = 0; $state.activeAddress = $null
                 $result = @{ address='studio/t74'; state='finished'; reason='killed' }
             }
             'doc.get' {
@@ -159,11 +169,12 @@ $serve = {
                         @{ id='sp1'; name=''; folder=$HOME; tabs=$work.tabs }
                         @{ id='sp2'; name='Personal'; tabs=@() }
                     }
-                    'core-studio' { $work.tabs[0].name = 'remote twin'; $work }
+                    'core-studio' { $work.name = $studioSpaceName; $work.tabs[0].name = 'remote twin'; $work }
                     'core-extra' { }
                     default { throw 'Unexpected document target' }
                 }
-                $result = @{ value=@{ spaces=@($spaces | Where-Object { $_ }) }; version=1 }
+                $version = if ($request.params.on -ceq 'core-studio' -and $studioSpaceName -cne 'Work') { 2 } else { 1 }
+                $result = @{ value=@{ spaces=@($spaces | Where-Object { $_ }) }; version=$version }
             }
             'machine.exec' {
                 # Reply with metadata only. Never execute the requested program in the fixture.
@@ -273,19 +284,41 @@ function TabsMatch([string[]]$expected, [string]$selected) {
     }
     return $true
 }
-$localWork = @('t74 · local twin · pwsh', 't76 · work sibling')
-function CheckScope($machine, $display) {
-    $expected = if ($machine -eq 'core-local') { $localWork } else { 'studio/t74 · remote twin' }
-    [void](WaitFor "$display / Work selected with only its unselected terminal tabs" {
-        $space = SpaceItem $machine Work
-        (StatusHidden) -and (TabsMatch $expected '') -and $space -and $space.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected
+# Expected wire routes and their UI labels are deliberately distinct on the relayed core.
+$localWork = @{ t74='t74 · local twin · pwsh'; t76='t76 · work sibling' }
+$remoteWork = @{ 'core-studio/t74'='studio/t74 · remote twin'; 'core-studio/t76'='studio/t76 · remote sibling' }
+$unassigned = @{ t77='t77 · loose first'; t78='t78 · loose second' }
+function AuthorizeAttach($address) {
+    if (!$address -or $state.nextTerminal -or $state.expectDetach -or $state.activeAddress -ceq $address) {
+        throw "Cannot authorize $address (pending: '$($state.nextTerminal)', active: '$($state.activeAddress)')"
+    }
+    $state.nextTerminal = $address # Consumed exactly once by the peer, never inferred from a client request.
+}
+function PaneMatches($address, $label) {
+    !$state.nextTerminal -and !$state.expectDetach -and [string]$state.activeAddress -ceq [string]$address -and
+        [string](FindId PaneHost).Current.Name -ceq [string]$label
+}
+function CheckScope($machine, $space, $terminals, $address) {
+    $label = if ($address) { $terminals[$address] } else { '' }
+    [void](WaitFor "$machine / $space, tabs [$($terminals.Values -join ', ')], viewer '$address'" {
+        $item = SpaceItem $machine $space
+        $statusOk = if ($terminals.Count) { StatusHidden } else { (FindId Status).Current.Name -ceq 'No live terminals in this space.' }
+        $statusOk -and $item -and $item.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
+            (TabsMatch $terminals.Values $label) -and (PaneMatches $address $label)
     })
     if ($machine -eq 'core-studio' -and (SpacePattern core-local Work).Current.IsSelected) { throw 'Two spaces selected' }
+}
+function SelectSpace($machine, $space, $terminals, $address) {
+    $selection = SpacePattern $machine $space
+    if ($terminals.Count) { AuthorizeAttach $address }
+    else { $state.expectDetach = [bool]$state.activeAddress } # Empty destination: CLOSE only if leaving a viewer.
+    $selection.Select()
+    CheckScope $machine $space $terminals $address
 }
 function CheckLocalOrder {
     $items = (FindId Spaces-core-local).FindAll('Children', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem))
     $names = ($items | ForEach-Object { $_.Current.Name }) -join ', '
-    if ($names -cne 'Archive, Work, Personal') { throw "Wrong saved space order: $names" }
+    if ($names -cne 'Archive, Work, Personal, Unassigned') { throw "Wrong saved space order: $names" }
 }
 function CheckNoAttachButtons {
     foreach ($id in 'Attach','ConnectionButton','Disconnect') { if (FindId $id) { throw "Obsolete control: $id" } }
@@ -295,22 +328,21 @@ function CheckNoAttachButtons {
             [PropertyCondition]::new([AutomationElement]::NameProperty, $name)))) { throw "Obsolete button: $name" }
     }
 }
-function CommitTerminal($address, $name) {
-    $label = "$address · $name"
+function CommitTerminal($terminals, $address) {
+    $label = $terminals[$address]; $previous = $state.activeAddress
     $item = WaitFor "terminal tab $label" { Find-TerminalItem (FindId TerminalTabs) $viewer.Id $label }
     $selection = $item.GetCurrentPattern([SelectionItemPattern]::Pattern)
-    $state.nextTerminal = $address # Only this exact commit may cause one RPC.
+    AuthorizeAttach $address
     $selection.Select()
     [void](WaitFor "selected and attached $label" {
-        (TabsMatch $localWork $label) -and (FindId PaneHost).Current.Name -ceq $label -and (StatusHidden) -and !$state.nextTerminal
+        (TabsMatch $terminals.Values $label) -and (PaneMatches $address $label) -and (StatusHidden)
     })
     [void](WaitFor "repaint of $address in the native pane" {
         $pane = (FindId PaneHost).FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
         $pattern = $null
         if ($pane -and $pane.TryGetCurrentPattern([TextPattern]::Pattern, [ref]$pattern)) {
             $screen = $pattern.DocumentRange.GetText(-1)
-            $other = if ($address -eq 't74') { 't76' } else { 't74' }
-            $screen.Contains("Fixture $address") -and !$screen.Contains("Fixture $other")
+            $screen.Contains("Fixture $address") -and (!$previous -or !$screen.Contains("Fixture $previous"))
         }
     })
 }
@@ -319,23 +351,24 @@ try {
     $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
     $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
     $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
-    $start.ArgumentList.Add("--pipe=\\.\pipe\$name"); $start.ArgumentList.Add('--select=t74')
+    $start.ArgumentList.Add("--pipe=\\.\pipe\$name"); $start.ArgumentList.Add('--select=t76') # Suggest a non-first tab's scope, not a viewer or remembered tab.
     $viewer = [Diagnostics.Process]::Start($start)
     $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
     $root = [AutomationElement]::FromHandle($hwnd)
     if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
     $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
-    CheckScope core-local Local # Wait until startup selection and layout have settled before clicking.
+    CheckScope core-local Work $localWork # Startup, including --select, is metadata-only.
     if ($MeasureSwitchTabs) {
         # Time selection to the first laid-out destination header, including UI Automation overhead.
-        # Same gateway, no viewer, no title changes. The first pair warms both spaces.
+        # Allow one viewer per selection. Settle it outside the sample; the first pair warms both spaces.
         $spaces = @(SpacePattern core-local bench-1; SpacePattern core-local bench-2)
         $strip = FindId TerminalTabs
         $state.switchesOnly = $true
         $times = for ($i = 0; $i -lt 14; $i++) {
-            $which = $i % 2
-            $match = [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, "TerminalTab-t$($which+1)00")
+            $which = $i % 2; $address = "t$($which+1)00"
+            $match = [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, "TerminalTab-$address")
+            AuthorizeAttach $address
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $spaces[$which].Select()
             do {
@@ -346,7 +379,12 @@ try {
                     throw "Missing destination in switch $i; tabs: $(($items | ForEach-Object { $_.Current.Name + ' [' + $_.Current.AutomationId + ']' }) -join ', ')"
                 }
             } while ($true)
+            $clock.Stop()
             if ($i -ge 2) { $clock.Elapsed.TotalMilliseconds }
+            [void](WaitFor "benchmark viewer $address" {
+                (PaneMatches $address "$address · Tab 0") -and (StatusHidden) -and
+                    $tab.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected
+            })
         }
         $sorted = @($times | Sort-Object)
         $state.closing = $true
@@ -363,67 +401,34 @@ try {
     if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Local machine must be labeled Local' }
     if (FindId PipePath) { throw 'The main pane still contains a pipe editor' }
     foreach ($expanded in $false,$true) {
-        ExpandGroup core-studio $expanded; CheckScope core-local Local
+        ExpandGroup core-studio $expanded; CheckScope core-local Work $localWork
     }
-    (SpacePattern core-local Archive).Select()
-    [void](WaitFor 'draggable title bar above the open sidebar and the empty workspace' {
-        (FindId Status).Current.Name -ceq 'No live terminals in this space.' -and (TabsMatch @() '') -and (TabsInCaption)
-    })
-    (SpacePattern core-studio Work).Select(); CheckScope core-studio studio
+    SelectSpace core-local Archive @{}
+    [void](WaitFor 'draggable title bar above the open sidebar and the empty workspace' { TabsInCaption })
+    # Check first-tab alignment with a strip that fits. WinUI adds scroll buttons before overflowing tabs.
+    $personal = @{ t75='t75 · personal terminal' }
+    SelectSpace core-local Personal $personal t75
 
     $toggleBounds = (FindId SidebarToggle).Current.BoundingRectangle
     $toggle.Toggle()
     [void](WaitFor 'hidden sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
         $toggle.Current.ToggleState -eq 'Off' -and (!$group -or $group.Current.IsOffscreen) -and
-        $toggleBounds.Equals((FindId SidebarToggle).Current.BoundingRectangle) -and (TabsInCaption 'studio/t74 · remote twin')
+        $toggleBounds.Equals((FindId SidebarToggle).Current.BoundingRectangle) -and (TabsInCaption $personal.t75)
     })
     $toggle.Toggle()
     [void](WaitFor 'visible sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
         $toggle.Current.ToggleState -eq 'On' -and $group -and !$group.Current.IsOffscreen -and
         $toggleBounds.Equals((FindId SidebarToggle).Current.BoundingRectangle)
-    }); CheckScope core-studio studio
+    }); CheckScope core-local Personal $personal t75
     [void](WaitFor 'tabs in the caption row, to the right of the open sidebar' {
         $sidebar = (FindId MachineBrowser).Current.BoundingRectangle
         $tabs = (FindId TerminalTabs).Current.BoundingRectangle
         $sidebar -and $tabs -and !$sidebar.IsEmpty -and !$tabs.IsEmpty -and
-        $sidebar.Width -gt 0 -and $tabs.Width -gt 0 -and $sidebar.Right -le $tabs.Left -and (TabsInCaption 'studio/t74 · remote twin')
+        $sidebar.Width -gt 0 -and $tabs.Width -gt 0 -and $sidebar.Right -le $tabs.Left -and (TabsInCaption $personal.t75)
     })
 
-    ExpandGroup core-local $false
-    $state.refresh = $true
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'new machine from refresh reply' { FindId MachineGroup-core-extra })
-    if (!(IsExpanded core-extra) -or (IsExpanded core-local)) { throw 'Refresh reset expansion state' }
-    ExpandGroup core-local $true; CheckScope core-studio studio; CheckLocalOrder
-    (SpacePattern core-local Work).Select(); CheckScope core-local Local
-
-    # No attach has been authorized during launch, browsing, sidebar toggles or refresh.
-    # Commit two different terminals from Work, then switch back on a third, fresh channel.
-    CommitTerminal t74 'local twin · pwsh'
-    [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork[0] })
-    $localWork[0] = 't74 · local twin · Git Changes'; $localWork += 't73 · new sibling'
-    $state.refresh = $false
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'live catalog refresh without losing the attachment' {
-        !(FindId MachineGroup-core-extra) -and (FindId PaneHost).Current.Name -ceq 't74 · local twin · Git Changes' -and
-        (TabsMatch $localWork 't74 · local twin · Git Changes') -and (StatusHidden)
-    })
-    CommitTerminal t76 'work sibling'
-    CommitTerminal t74 'local twin · Git Changes'
-    CheckNoAttachButtons
-    if ($state.attaches -ne 3 -or $state.switchAcks -ne 2) { throw 'Incomplete attach/close sequence on original pipe' }
-    $state.leavingSpace = $true
-    (SpacePattern core-studio Work).Select(); CheckScope core-studio studio
-    [void](WaitFor 'space change released only the viewer' { !$state.leavingSpace })
-    $state.refresh = $true; $state.updateHidden = $true
-    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
-    [void](WaitFor 'original gateway still connected after leaving the space' { FindId MachineGroup-core-extra })
-    # On return, a reused header must take its new title; a terminal that finished while away must be absent.
-    $localWork = @('t74 · local twin · pwsh', 't76 · work sibling')
-    (SpacePattern core-local Work).Select(); CheckScope core-local Local
-    (SpacePattern core-studio Work).Select(); CheckScope core-studio studio
     $window = $root.GetCurrentPattern([WindowPattern]::Pattern)
     foreach ($visualState in 'Maximized','Normal') {
         (Pattern Maximize ([InvokePattern]::Pattern)).Invoke()
@@ -431,19 +436,58 @@ try {
         $action = if ($visualState -eq 'Maximized') { 'Restore' } else { 'Maximize' }
         [void](WaitFor "$visualState with a $height DIP caption and $action button" {
             $window.Current.WindowVisualState -eq $visualState -and (FindId Maximize).Current.Name -ceq $action -and
-            (TabsInCaption 'studio/t74 · remote twin') -and (CaptionFits $height)
+            (TabsInCaption $personal.t75) -and (CaptionFits $height)
         })
     }
     (Pattern Minimize ([InvokePattern]::Pattern)).Invoke()
     [void](WaitFor 'caption minimized the window' { $window.Current.WindowVisualState -eq 'Minimized' })
     $window.SetWindowVisualState('Normal')
     [void](WaitFor 'restored full-height caption buttons' { $window.Current.WindowVisualState -eq 'Normal' -and (CaptionFits 40) })
+    if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Minimizing can collapse the sidebar.
+
+    SelectSpace core-studio Work $remoteWork core-studio/t74
+    ExpandGroup core-local $false
+    $state.extraMachine = $true
+    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
+    [void](WaitFor 'new machine from refresh reply' { FindId MachineGroup-core-extra })
+    if (!(IsExpanded core-extra) -or (IsExpanded core-local)) { throw 'Refresh reset expansion state' }
+    ExpandGroup core-local $true; CheckScope core-studio Work $remoteWork core-studio/t74; CheckLocalOrder
+    CommitTerminal $remoteWork core-studio/t76
+    # First intentional visit to local sp1: neither --select nor studio's t76 chose a local tab.
+    SelectSpace core-local Work $localWork t74
+    [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork.t74 })
+    $localWork.t74 = 't74 · local twin · Git Changes'; $localWork.t73 = 't73 · new sibling'
+    $state.extraMachine = $false; $state.catalogEdit = 'insert'
+    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
+    [void](WaitFor 'removed extra machine' { !(FindId MachineGroup-core-extra) })
+    CheckScope core-local Work $localWork t74 # Inserted t73 and renamed t74; no new viewer.
+    CommitTerminal $localWork t76
+    CommitTerminal $localWork t74
+    CheckNoAttachButtons
+
+    # Remember non-first tabs independently, including the null space ID and two cores with identical sp1/t74/t76 IDs.
+    SelectSpace core-local Unassigned $unassigned t77
+    CommitTerminal $unassigned t78
+    SelectSpace core-local Work $localWork t74
+    SelectSpace core-local Unassigned $unassigned t78
+    SelectSpace core-local Archive @{} # The active viewer must detach, without attaching a neighbor.
+    SelectSpace core-studio Work $remoteWork core-studio/t76
+    SelectSpace core-local Work $localWork t74
+    CommitTerminal $localWork t76
+    SelectSpace core-studio Work $remoteWork core-studio/t76 # Same terminal ID, different viewer/route.
+
+    $state.extraMachine = $true; $state.catalogEdit = 'finish-hidden'
+    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
+    [void](WaitFor 'original gateway still connected after leaving the space' { FindId MachineGroup-core-extra })
+    CheckScope core-studio 'Renamed Work' $remoteWork core-studio/t76 # Same viewer through the sidebar rename.
+    # Even a reused strip must drop finished local t76 and show t74's new title. Fall back to first live t73.
+    $localWork.Remove('t76'); $localWork.t74 = 't74 · local twin · pwsh'
+    SelectSpace core-local Work $localWork t73
+    SelectSpace core-studio 'Renamed Work' $remoteWork core-studio/t76
+    CommitTerminal $remoteWork core-studio/t74
     # The native close glyph ends the addressed terminal on its own core, not the window or the local twin.
-    $remoteLabel = 'studio/t74 · remote twin'
+    $remoteLabel = $remoteWork['core-studio/t74']
     $remoteTab = Find-TerminalItem (FindId TerminalTabs) $viewer.Id $remoteLabel
-    $state.nextTerminal = 'core-studio/t74'
-    $remoteTab.GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
-    [void](WaitFor 'remote fixture pane' { (FindId PaneHost).Current.Name -ceq $remoteLabel })
     $glyph = WaitFor 'close glyph on selected tab' {
         $remoteTab.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::Button))
     }
@@ -451,15 +495,15 @@ try {
     $glyph.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
     [void](WaitFor 'refused close kept the terminal and its viewer' {
         !$state.allowRemoteClose -and (FindId Status).Current.Name -like 'Could not confirm closing studio/t74.*' -and
-        (FindId PaneHost).Current.Name -ceq $remoteLabel -and (TabsMatch @($remoteLabel) $remoteLabel)
+        (PaneMatches core-studio/t74 $remoteLabel) -and (TabsMatch $remoteWork.Values $remoteLabel)
     })
     $state.allowRemoteClose = $true
     $glyph.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
-    [void](WaitFor 'remote terminal closed without closing the window' {
-        !$state.allowRemoteClose -and (TabsMatch @() '') -and (FindId Status).Current.Name -ceq 'Program killed.'
+    [void](WaitFor 'remote terminal closed without closing the window or attaching its sibling' {
+        !$state.allowRemoteClose -and (PaneMatches $null '') -and (TabsMatch $remoteWork['core-studio/t76'] '') -and
+            (FindId Status).Current.Name -ceq 'Program killed.'
     })
-    if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Minimizing can collapse the sidebar.
-    (SpacePattern core-local Work).Select(); CheckScope core-local Local
+    SelectSpace core-local Work $localWork t73
     $state.closing = $true
     (Pattern Close ([InvokePattern]::Pattern)).Invoke()
     if (!$viewer.WaitForExit(5000)) { throw 'Viewer did not close normally' }
