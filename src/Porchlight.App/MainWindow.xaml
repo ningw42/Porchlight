@@ -27,15 +27,16 @@
         </ToggleButton>
         <Grid x:Name="SidebarDragArea" Grid.Column="1" />
       </Grid>
-      <TabView x:Name="TerminalTabs" Grid.Column="1" AutomationProperties.Name="Live terminals in this space"
+      <!-- WinUI's tab header uses fractional widths. Rounding its slot can clip the selected corner arcs. -->
+      <TabView x:Name="TerminalTabs" Grid.Column="1" UseLayoutRounding="False" AutomationProperties.Name="Live terminals in this space"
                SelectedIndex="-1" SelectionChanged="TerminalSelected" TabWidthMode="SizeToContent"
                CloseButtonOverlayMode="OnPointerOver" TabCloseRequested="TerminalCloseRequested"
                IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" AllowDropTabs="False">
         <TabView.Resources>
           <Style TargetType="primitives:TabViewListView">
-            <!-- WinUI 1.8 leaves 8 DIPs before the first tab. Cancel that inset so the tab starts at the
-                 workspace edge when the sidebar is open, or at the toggle's right margin when closed. -->
-            <Setter Property="Margin" Value="-8,0,0,0" />
+            <!-- Of WinUI's 8-DIP leading inset, keep the 4 DIPs occupied by the selected tab's outward curve.
+                 Its tip then aligns with the workspace edge (or the toggle's right margin when closed). -->
+            <Setter Property="Margin" Value="-4,0,0,0" />
             <!-- A space change replaces a list; don't animate it as a sequence of tab opens/closes. -->
             <Setter Property="ItemContainerTransitions">
               <Setter.Value><TransitionCollection /></Setter.Value>

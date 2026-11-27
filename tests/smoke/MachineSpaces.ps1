@@ -45,7 +45,7 @@ $serve = {
     $eventChannel = 9; $nextChannel = 41; $studioSpaceName = 'Work'
     $targets = @{
         t74 = @{ address='t74'; name='local twin'; state='live'; argv=@('pwsh.exe'); cwd='C:\fixture\launch'; foreground=@{cwd='C:\fixture\Work\src'} }
-        t75 = @{ address='t75'; name='personal terminal'; state='live'; labels=@{'herdr.space'='sp2'} }
+        t75 = @{ address='t75'; title='π - ScopeJobs'; status=@{app='pi'}; state='live'; labels=@{'herdr.space'='sp2'} }
         t76 = @{ address='t76'; name='work sibling'; state='live'; labels=@{'herdr.space'='sp1'} }
         t77 = @{ address='t77'; name='loose first'; state='live' }
         t78 = @{ address='t78'; name='loose second'; state='live' }
@@ -112,6 +112,10 @@ $serve = {
                 if ($state.extraMachine) { $machines += @{ id='core-extra'; name='extra'; state='connected' } }
                 $result = @{ machines=$machines }
                 switch ($state.catalogEdit) {
+                    'retitle' {
+                        $targets.t75.title = 'π - Porchlight'
+                        WriteEvent @{ seq=80; type='title'; terminal='t75'; data=@{title=$targets.t75.title} }
+                    }
                     'insert' {
                         if ($state.activeAddress -cne 't74') { throw 'Expected the local twin during catalog insertion' }
                         # Insert before the selected tab; preserve its address, not its index.
@@ -133,7 +137,7 @@ $serve = {
             }
             'events.subscribe' {
                 if ($subscribed) { throw 'Viewer subscribed a second time' }; $subscribed = $true
-                $result = @{ channel=$eventChannel; seq=80; terminals=@($targets.Values) }
+                $result = @{ channel=$eventChannel; seq=79; terminals=@($targets.Values) }
             }
             'terminal.attach' {
                 $address = $request.params.terminal
@@ -419,8 +423,15 @@ try {
     SelectSpace core-local Archive @{}
     [void](WaitFor 'draggable title bar above the open sidebar and the empty workspace' { TabsInCaption })
     # Check first-tab alignment with a strip that fits. WinUI adds scroll buttons before overflowing tabs.
-    $personal = @{ t75='t75 · personal terminal' }
+    $personal = @{ t75='t75 · π - ScopeJobs' }
     SelectSpace core-local Personal $personal t75
+    # These headers round in opposite directions at 200% DPI. UIA includes the visible corner in the tab bounds.
+    [void](WaitFor 'ScopeJobs tab corner at the workspace edge' { TabsInCaption $personal.t75 })
+    $state.catalogEdit = 'retitle'
+    (Pattern RefreshMachinesButton ([InvokePattern]::Pattern)).Invoke()
+    $personal.t75 = 't75 · π - Porchlight'
+    CheckScope core-local Personal $personal t75
+    [void](WaitFor 'same leading corner after the selected tab is retitled' { TabsInCaption $personal.t75 })
 
     $toggleBounds = (FindId SidebarToggle).Current.BoundingRectangle
     $toggle.Toggle()
