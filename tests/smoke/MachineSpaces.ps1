@@ -3,7 +3,8 @@
 using namespace System.Windows.Automation
 using namespace System.IO.Pipes
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Exe, [ValidateRange(0,96)][int]$MeasureSwitchTabs = 0)
+param([Parameter(Mandatory)][string]$Exe, [ValidateRange(0,96)][int]$MeasureSwitchTabs = 0,
+    [ValidateSet('Default','Select','Browse')][string]$Startup = 'Default')
 $ErrorActionPreference = 'Stop'
 $exePath = (Get-Item -LiteralPath $Exe).FullName
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -25,7 +26,7 @@ public static class PorchlightChrome {
 $name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
 $pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
 $state = [hashtable]::Synchronized(@{ extraMachine=$false; catalogEdit=$null; closing=$false; expectDetach=$false
-    nextTerminal=$null; activeAddress=$null; measureTabs=$MeasureSwitchTabs })
+    nextTerminal=$null; activeAddress=$null; measureTabs=$MeasureSwitchTabs; deferLocalLayout=($Startup -eq 'Select') })
 $viewer = $peer = $root = $null
 $serve = {
     param($pipe, $state)
@@ -164,8 +165,8 @@ $serve = {
                 $work = @{ id='sp1'; name='Work'; tabs=@(@{ root=@{ type='block'; content=@{ terminal='t74' } } }) }
                 $spaces = switch ($request.params.on) {
                     $null {
-                        # Saved order differs from alphabetical order; the CLI target is not in the first space.
-                        @{ id='sp3'; name='Archive'; tabs=@() }
+                        # First saved space still has a tab, but t70 is not in the live snapshot.
+                        @{ id='sp3'; name='Archive'; tabs=@(@{root=@{type='block'; content=@{terminal='t70'}}}) }
                         @{ id='sp1'; name=''; folder=$HOME; tabs=$work.tabs }
                         @{ id='sp2'; name='Personal'; tabs=@() }
                     }
@@ -175,6 +176,11 @@ $serve = {
                 }
                 $version = if ($request.params.on -ceq 'core-studio' -and $studioSpaceName -cne 'Work') { 2 } else { 1 }
                 $result = @{ value=@{ spaces=@($spaces | Where-Object { $_ }) }; version=$version }
+                if ($state.deferLocalLayout -and !$request.params.on) {
+                    # The initial snapshot must be usable even when this optional reply is late.
+                    $state.deferLocalLayout = $false; $deferredLayout = Reply $request.id $result
+                    continue messages
+                }
             }
             'machine.exec' {
                 # Reply with metadata only. Never execute the requested program in the fixture.
@@ -188,7 +194,10 @@ $serve = {
             default { throw "Unexpected RPC: $($request.method)" }
         }
         WriteFrame 0 0 (Reply $request.id $result)
-        if ($request.method -ceq 'terminal.attach') { WriteFrame $active 0 ($utf8.GetBytes("Fixture $address`r`n")) }
+        if ($request.method -ceq 'terminal.attach') {
+            WriteFrame $active 0 ($utf8.GetBytes("Fixture $address`r`n"))
+            if ($deferredLayout) { WriteFrame 0 0 $deferredLayout; $deferredLayout = $null }
+        }
     }
 }
 
@@ -351,14 +360,18 @@ try {
     $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
     $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
     $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
-    $start.ArgumentList.Add("--pipe=\\.\pipe\$name"); $start.ArgumentList.Add('--select=t76') # Suggest a non-first tab's scope, not a viewer or remembered tab.
+    $start.ArgumentList.Add("--pipe=\\.\pipe\$name")
+    if ($Startup -ne 'Default') { $start.ArgumentList.Add('--select=t76') }
+    if ($Startup -eq 'Browse') { $start.ArgumentList.Add('--browse') }
+    $startupTerminal = switch ($Startup) { 'Default' { 't74' } 'Select' { 't76' } 'Browse' { $null } }
+    if ($startupTerminal) { AuthorizeAttach $startupTerminal }
     $viewer = [Diagnostics.Process]::Start($start)
     $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
     $root = [AutomationElement]::FromHandle($hwnd)
     if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
     $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
-    CheckScope core-local Work $localWork # Startup, including --select, is metadata-only.
+    CheckScope core-local Work $localWork $startupTerminal # No manual tab selection at launch.
     if ($MeasureSwitchTabs) {
         # Time selection to the first laid-out destination header, including UI Automation overhead.
         # Allow one viewer per selection. Settle it outside the sample; the first pair warms both spaces.
@@ -401,7 +414,7 @@ try {
     if ((FindId MachineGroup-core-local).Current.Name -cne 'Local, connected') { throw 'Local machine must be labeled Local' }
     if (FindId PipePath) { throw 'The main pane still contains a pipe editor' }
     foreach ($expanded in $false,$true) {
-        ExpandGroup core-studio $expanded; CheckScope core-local Work $localWork
+        ExpandGroup core-studio $expanded; CheckScope core-local Work $localWork $startupTerminal
     }
     SelectSpace core-local Archive @{}
     [void](WaitFor 'draggable title bar above the open sidebar and the empty workspace' { TabsInCaption })
@@ -453,8 +466,9 @@ try {
     if (!(IsExpanded core-extra) -or (IsExpanded core-local)) { throw 'Refresh reset expansion state' }
     ExpandGroup core-local $true; CheckScope core-studio Work $remoteWork core-studio/t74; CheckLocalOrder
     CommitTerminal $remoteWork core-studio/t76
-    # First intentional visit to local sp1: neither --select nor studio's t76 chose a local tab.
-    SelectSpace core-local Work $localWork t74
+    # The local startup choice is independent of studio's t76. Browse left no remembered tab.
+    SelectSpace core-local Work $localWork ($startupTerminal ?? 't74')
+    if ($startupTerminal -ceq 't76') { CommitTerminal $localWork t74 }
     [void](WaitFor 'selected first tab aligned with the workspace' { TabsInCaption $localWork.t74 })
     $localWork.t74 = 't74 · local twin · Git Changes'; $localWork.t73 = 't73 · new sibling'
     $state.extraMachine = $false; $state.catalogEdit = 'insert'

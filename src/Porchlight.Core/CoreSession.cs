@@ -157,9 +157,17 @@ public sealed class CoreSession : IAsyncDisposable
         if (!documentRequests.Remove(id, out var machine)) return; // retired route, possibly since reconnected
         pendingDocuments.Remove(machine.Id);
         if (dirtyDocuments.Remove(machine.Id)) RequestDocument(machine);
-        if (reply.TryGetProperty("error", out _)) return; // optional capability, including on a relayed peer
-        var result = Wire.Result(reply, id, "doc.get");
-        layouts[machine.Id] = SpaceLayout.Read(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("value", out var value) ? value : default);
+        if (reply.TryGetProperty("error", out _))
+        {
+            // Optional RPC, including on a relayed peer. Keep any previous layout. Otherwise
+            // release startup to use the label-only catalog when there is no retry in flight.
+            if (pendingDocuments.ContainsKey(machine.Id) || !layouts.TryAdd(machine.Id, new SpaceLayout())) return;
+        }
+        else
+        {
+            var result = Wire.Result(reply, id, "doc.get");
+            layouts[machine.Id] = SpaceLayout.Read(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("value", out var value) ? value : default);
+        }
         PublishCatalog();
     }
 
@@ -177,7 +185,7 @@ public sealed class CoreSession : IAsyncDisposable
 
     void PublishCatalog()
     {
-        Volatile.Write(ref directory, catalog.Directory(machines, layouts, supportsCheckout ? checkoutNames.Lookup : null));
+        Volatile.Write(ref directory, catalog.Directory(machines, supportsDocuments ? layouts : null, supportsCheckout ? checkoutNames.Lookup : null));
         if (supportsCheckout)
             lock (gate) if (!closing && !finished) checkoutNames.FinishProjection(NextMetadataId, Enqueue);
         CatalogChanged?.Invoke();

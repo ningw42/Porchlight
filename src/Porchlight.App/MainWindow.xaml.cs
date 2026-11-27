@@ -16,9 +16,8 @@ public sealed partial class MainWindow : Window
     CoreSession? session;
     HerdMachine? selectedMachine;
     TerminalSpace? selectedSpace;
-    Target? suggested;
     Task? connecting;
-    bool configured, busy, closing, mayClose, active, updatingSelection, userChoseScope;
+    bool configured, busy, closing, mayClose, active, updatingSelection, startupPending;
     string? viewerNotice;
 
     public MainWindow()
@@ -114,7 +113,7 @@ public sealed partial class MainWindow : Window
             Workspace.IsPaneOpen = false;
     }
 
-    void RefreshList(CoreSession s, bool initial = false)
+    void RefreshList(CoreSession s, bool initial = false, bool useAvailableLayout = false)
     {
         if (session != s || closing) return;
         var catalog = s.Directory;
@@ -124,21 +123,45 @@ public sealed partial class MainWindow : Window
             var address = options.Select;
             var alias = options.Machine ?? (address?.Contains('/') == true ? address.Split('/')[0] : null);
             machine = catalog.Machines.FirstOrDefault(m => alias == null ? m.IsLocal : m.Name == alias);
-            suggested = machine != null && address != null ? new(machine.Id, address) : null;
-            userChoseScope = false; viewerNotice = null;
-            options.Machine = options.Select = null;
+            startupPending = true;
+        }
+        if (startupPending)
+        {
+            // Space order and membership can change with the first layout reply. Wait only for
+            // this machine, not for checkout names or other machines, before committing a viewer.
+            if (machine != null && catalog.AwaitingLayout(machine) && !useAvailableLayout)
+            {
+                if (initial) _ = FinishStartupIfLayoutIsLate(s);
+                viewerNotice = "Loading spaces…";
+                ShowScope(catalog, machine, null);
+                return;
+            }
+            startupPending = false;
+            var start = machine == null ? null : catalog.StartupSpace(machine, options.Select);
+            viewerNotice = machine == null ? "The requested machine is not available." :
+                machine.Available && options.Select != null && start == null ? "The requested terminal is not live on this machine." : null;
+            if (!options.Browse && start != null && options.Select is { } exact)
+                spaceTabs.Remember(machine!, start, exact);
+            ShowScope(catalog, machine, start, enterSpace: !options.Browse);
+            return;
         }
         var spaces = machine == null ? [] : catalog.SpacesFor(machine);
         var space = spaces.FirstOrDefault(x => selectedSpace != null && x.Id == selectedSpace.Id);
-        var locate = requested ?? suggested;
-        if (locate != null && machine != null && locate.MachineId == machine.Id)
+        if (requested is { } locate && machine != null && locate.MachineId == machine.Id)
         {
             // Never let a reused alias, or a late metadata reply, select a different viewer.
             var t = catalog.Terminals.FirstOrDefault(t => t.Address == locate.Address && t.MachineAlias == (machine.IsLocal ? null : machine.Name));
             if (t != null) space = t.Space;
         }
-        if (!userChoseScope) space ??= spaces.FirstOrDefault();
         ShowScope(catalog, machine, space);
+    }
+
+    async Task FinishStartupIfLayoutIsLate(CoreSession s)
+    {
+        // doc.get is optional. An unresponsive peer must not hide a live tab indefinitely.
+        try { await Task.Delay(TimeSpan.FromSeconds(3), lifetime.Token); }
+        catch (OperationCanceledException) { return; }
+        if (session == s && startupPending) RefreshList(s, useAvailableLayout: true);
     }
 
     void ShowScope(MachineDirectory catalog, HerdMachine? machine, TerminalSpace? space, bool enterSpace = false)
@@ -151,7 +174,7 @@ public sealed partial class MainWindow : Window
             var items = machine != null && space != null ? catalog.TerminalsIn(machine, space) : [];
             if (enterSpace)
             {
-                // A deliberate sidebar switch hands off the viewer; a catalog repaint never does.
+                // Startup or a sidebar switch hands off the viewer; a catalog repaint never does.
                 RequestViewer(machine != null && space != null && spaceTabs.Enter(machine, space, items) is { } address
                     ? new(machine.Id, address) : null);
             }
@@ -193,7 +216,7 @@ public sealed partial class MainWindow : Window
         var catalog = session.Directory;
         var machine = catalog.Machines.FirstOrDefault(m => m.Id == group.Machine.Id);
         var space = machine != null && group.SelectedSpace is { } pick ? catalog.SpacesFor(machine).FirstOrDefault(s => s.Id == pick.Id) : null;
-        suggested = null; viewerNotice = null; userChoseScope = true;
+        startupPending = false; viewerNotice = null;
         ShowScope(catalog, machine, space, enterSpace: true);
     }
 
@@ -206,7 +229,7 @@ public sealed partial class MainWindow : Window
     {
         if (updatingSelection || closing || busy || session == null || selectedMachine is not { Available: true } machine ||
             selectedSpace is not { } space || TerminalTabs.SelectedItem is not TabViewItem { Tag: Target target } || target.MachineId != machine.Id) return;
-        suggested = null; viewerNotice = null; userChoseScope = true;
+        startupPending = false; viewerNotice = null;
         spaceTabs.Remember(machine, space, target.Address);
         RequestViewer(target);
     }
@@ -216,6 +239,7 @@ public sealed partial class MainWindow : Window
         if (requested != null || session == null || closing) return;
         ShowStatus(viewerNotice ?? (selectedMachine switch {
             { Available: false } m => $"{m.DisplayName}: {m.State.Replace('_', ' ')}. Check the connection in HerdR, then refresh the machines.",
+            { } m when selectedSpace == null && session.Directory.SpacesFor(m).Count == 0 => "No live terminals on this machine.",
             _ when selectedSpace == null => "Select a space in the sidebar.",
             _ when shownTabs.Length == 0 => "No live terminals in this space.",
             _ => ""
@@ -237,7 +261,7 @@ public sealed partial class MainWindow : Window
     {
         var end = await s.Completion;
         if (session != s || closing) return;
-        session = null; suggested = null;
+        session = null; startupPending = false;
         RequestViewer(null);
         CoreLabel.Text = "Not connected";
         ShowScope(new([], []), null, null);

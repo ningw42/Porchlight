@@ -34,7 +34,10 @@ public class LayoutRpcTests
         int local = await ReadDocument(p), remote = await ReadDocument(p, "core-studio");
         Assert.AreNotEqual(local, remote);
         string Space(string address) => s.Terminals.Single(t => t.Address == address).Space.DisplayName;
+        var localMachine = s.Directory.Machines.Single(m => m.IsLocal);
+        var studio = s.Directory.Machines.Single(m => m.Name == "studio");
         await p.Reply(remote, Layout("Studio")); await p.Fence();
+        Assert.IsFalse(s.Directory.AwaitingLayout(studio)); Assert.IsTrue(s.Directory.AwaitingLayout(localMachine));
         Assert.AreEqual("Studio", Space("studio/t74")); Assert.AreEqual("Unassigned", Space("t74"));
         await p.Reply(local, Layout("Work")); await p.Fence();
         Assert.AreEqual("Studio", Space("studio/t74")); Assert.AreEqual("Work", Space("t74"));
@@ -45,6 +48,21 @@ public class LayoutRpcTests
         int refresh = await ReadDocument(p, "core-studio"); await p.Credit(9, change.Length);
         await p.Reply(refresh, Layout("Updated")); await p.Fence();
         Assert.AreEqual("Updated", Space("studio/t74")); Assert.AreEqual("Work", Space("t74"));
+    }
+
+    [TestMethod, DataRow(false), DataRow(true)]
+    public async Task MissingOrRefusedLayoutDoesNotBlockStartup(bool advertised)
+    {
+        using var p = new Peer(); var open = CoreSession.ConnectAsync(p.Endpoint);
+        await p.Hello(docs: advertised); await p.Call("events.subscribe"); await p.Subscribe();
+        await using var s = await open; var machine = s.Directory.Machines.Single();
+        if (advertised)
+        {
+            Assert.IsTrue(s.Directory.AwaitingLayout(machine));
+            await p.Refuse(await ReadDocument(p)); await p.Fence();
+        }
+        Assert.IsFalse(s.Directory.AwaitingLayout(machine));
+        Assert.AreEqual(TerminalSpace.Unassigned, s.Directory.StartupSpace(machine, null));
     }
 
     [TestMethod, DataRow("original"), DataRow("replacement")]

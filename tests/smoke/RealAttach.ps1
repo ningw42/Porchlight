@@ -82,6 +82,7 @@ try {
     foreach ($pass in 1,2) {
         $r=Owned; if ($r.state -ne 'live') { throw 'Fixture is not live.' }
         $psi=[Diagnostics.ProcessStartInfo]::new($exe); $psi.UseShellExecute=$false
+        $psi.ArgumentList.Add('--browse') # Verify core and fixture ownership in the window before any attach.
         $psi.ArgumentList.Add("--pipe=$Pipe"); $psi.ArgumentList.Add("--select=$id")
         if ($WindowsTerminalSettings) { $psi.ArgumentList.Add("--wt-font=$WindowsTerminalSettings") }
         $viewer=[Diagnostics.Process]::Start($psi)

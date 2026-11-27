@@ -76,7 +76,7 @@ internal sealed class TerminalCatalog(string? viewerHome = null, ProgramNames? p
             }
         }
         visible.Sort((a, b) => string.CompareOrdinal(a.Address, b.Address));
-        return new(machines, visible.AsReadOnly()) { LayoutSpaces = layoutSpaces };
+        return new(machines, visible.AsReadOnly()) { LayoutSpaces = layoutSpaces, ExpectsLayouts = layouts != null };
     }
 
     string? PaneFolder(HerdMachine machine, string address)

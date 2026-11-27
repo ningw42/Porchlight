@@ -31,6 +31,25 @@ public class SpaceLayoutTests
     }
 
     [TestMethod]
+    public void StartupUsesSidebarOrderButSkipsSpacesWithNoLiveTerminals()
+    {
+        var archive = new TerminalSpace("sp3", "Archive");
+        var work = new TerminalSpace("sp2", "Work");
+        var personal = new TerminalSpace("sp1", "Personal");
+        var saved = new Dictionary<string, TerminalSpace[]> { [Local.Id] = [archive, work, personal] };
+        var dir = new MachineDirectory([Local, Remote], [new("t1", null) { Space = personal },
+            new("t2", null) { Space = work }, new("studio/t1", null)]) { LayoutSpaces = saved };
+        Assert.AreEqual(work, dir.StartupSpace(Local, null));
+        Assert.AreEqual(personal, dir.StartupSpace(Local, "t1"));
+        Assert.AreEqual(TerminalSpace.Unassigned, dir.StartupSpace(Remote, null));
+        Assert.IsNull(dir.StartupSpace(Local, "studio/t1")); // An explicit miss must not attach a neighbor.
+        Assert.IsNull(dir.StartupSpace(Local, "t9"));
+        var empty = new MachineDirectory([Local, Remote], []) { LayoutSpaces = saved };
+        Assert.AreEqual(archive, empty.StartupSpace(Local, null));
+        Assert.IsNull(empty.StartupSpace(Remote, null));
+    }
+
+    [TestMethod]
     public void OnlyAChangeToTheDocumentOrderMovesSavedRows()
     {
         var catalog = new TerminalCatalog();

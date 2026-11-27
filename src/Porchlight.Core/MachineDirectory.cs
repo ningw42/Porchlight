@@ -22,6 +22,7 @@ public sealed class MachineDirectory(IReadOnlyList<HerdMachine> machines, IReadO
 {
     public IReadOnlyList<HerdMachine> Machines { get; } = machines;
     public IReadOnlyList<LiveTerminal> Terminals { get; } = terminals;
+    internal bool ExpectsLayouts { get; init; }
     internal IReadOnlyDictionary<string, TerminalSpace[]> LayoutSpaces { get; init; } = new Dictionary<string, TerminalSpace[]>();
     readonly ILookup<string?, LiveTerminal> byMachine = terminals.ToLookup(t => t.MachineAlias, StringComparer.Ordinal);
     IEnumerable<LiveTerminal> On(HerdMachine machine) => machine.Available ? byMachine[machine.IsLocal ? null : machine.Name] : [];
@@ -35,6 +36,17 @@ public sealed class MachineDirectory(IReadOnlyList<HerdMachine> machines, IReadO
             .OrderBy(s => s.Id == null).ThenBy(s => s.Id, StringComparer.Ordinal);
         return [.. saved, .. unsaved];
     }
+    public bool AwaitingLayout(HerdMachine machine) => machine.Available && ExpectsLayouts && !LayoutSpaces.ContainsKey(machine.Id);
+
+    public TerminalSpace? StartupSpace(HerdMachine machine, string? address)
+    {
+        var live = On(machine);
+        if (address != null) return live.FirstOrDefault(t => t.Address == address)?.Space;
+        var spaces = SpacesFor(machine);
+        var occupied = live.Select(t => t.Space.Id).ToHashSet(StringComparer.Ordinal);
+        return spaces.FirstOrDefault(s => occupied.Contains(s.Id)) ?? spaces.FirstOrDefault();
+    }
+
     public IReadOnlyList<LiveTerminal> TerminalsIn(HerdMachine machine, TerminalSpace space) =>
         On(machine).Where(t => t.Space.Id == space.Id).ToArray();
 

@@ -5,6 +5,7 @@ namespace Porchlight.App;
 internal sealed class LaunchOptions
 {
     public string? Pipe, Machine, Select;
+    public bool Browse { get; private set; }
     public TerminalFont Font { get; private set; } = new();
     public bool ImportedFont { get; private set; }
     public TerminalScheme? Scheme { get; private set; }
@@ -16,13 +17,14 @@ internal sealed class LaunchOptions
         var overrides = new Dictionary<string, float>();
         foreach (var arg in args)
         {
+            if (arg == "--browse") { options.Browse = true; continue; }
             var pair = arg.Split('=', 2);
             if (pair.Length != 2 || string.IsNullOrWhiteSpace(pair[1])) throw new FormatException("Expected --option=value. See README.");
             switch (pair[0])
             {
                 case "--pipe": options.Pipe = pair[1]; break;
                 case "--machine": options.Machine = pair[1]; break;
-                case "--select": options.Select = pair[1]; break; // locate its space without attaching at launch
+                case "--select": options.Select = pair[1]; break;
                 case "--wt-font": fontPath = pair[1]; break;
                 case "--wt-scheme": schemeName = pair[1]; break;
                 case "--face": face = pair[1]; break;
