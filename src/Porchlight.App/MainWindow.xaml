@@ -6,8 +6,8 @@
   </Window.SystemBackdrop>
   <Grid SizeChanged="LayoutSizeChanged" RowDefinitions="Auto,*">
     <Grid x:Name="AppTitleBar" ColumnDefinitions="Auto,*,Auto" AutomationProperties.Name="Window title bar">
-      <Grid Width="{x:Bind SidebarHeaderWidth(Workspace.IsPaneOpen, Workspace.OpenPaneLength), Mode=OneWay}" ColumnDefinitions="Auto,*">
-        <ToggleButton x:Name="SidebarToggle" IsChecked="True" Width="28" Height="28" Margin="4,8,4,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top"
+      <Grid MinWidth="{x:Bind SidebarSlot.Width, Mode=OneWay}" ColumnDefinitions="Auto,*">
+        <ToggleButton x:Name="SidebarToggle" IsChecked="True" Checked="SidebarToggled" Unchecked="SidebarToggled" Width="28" Height="28" Margin="4,8,4,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top"
                       HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Background="{ThemeResource TabViewButtonBackground}"
                       BorderThickness="{ThemeResource TabViewButtonBorderThickness}" BorderBrush="{ThemeResource TabViewButtonBorderBrush}"
                       AutomationProperties.Name="Machine and space sidebar" ToolTipService.ToolTip="Show or hide the sidebar">
@@ -27,10 +27,10 @@
         </ToggleButton>
         <Grid x:Name="SidebarDragArea" Grid.Column="1" />
       </Grid>
-      <Grid Grid.Column="1" SizeChanged="TabViewportSizeChanged" Clip="{x:Bind TabStripClip(Workspace.IsPaneOpen), Mode=OneWay}">
+      <Grid Grid.Column="1" SizeChanged="TabViewportSizeChanged" Clip="{x:Bind TabStripClip(SidebarToggle.IsChecked), Mode=OneWay}">
         <!-- Match WinUI's fractional header widths so rounding doesn't clip the selected tab's curves. -->
         <TabView x:Name="TerminalTabs" UseLayoutRounding="False" AutomationProperties.Name="Live terminals in this space"
-                 Margin="{x:Bind TabStripMargin(Workspace.IsPaneOpen), Mode=OneWay}"
+                 Margin="{x:Bind TabStripMargin(SidebarToggle.IsChecked), Mode=OneWay}"
                  SelectedIndex="-1" SelectionChanged="TerminalSelected" TabWidthMode="SizeToContent"
                  CloseButtonOverlayMode="OnPointerOver" TabCloseRequested="TerminalCloseRequested"
                  IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" AllowDropTabs="False">
@@ -78,11 +78,11 @@
       </StackPanel>
     </Grid>
 
-    <SplitView x:Name="Workspace" Grid.Row="1" DisplayMode="Inline"
-               IsPaneOpen="{Binding IsChecked, ElementName=SidebarToggle, Mode=TwoWay}"
-               PaneBackground="{ThemeResource LayerFillColorDefaultBrush}">
-      <SplitView.Pane>
-        <Grid Padding="12" RowDefinitions="*,Auto" RowSpacing="12">
+    <Grid x:Name="Workspace" Grid.Row="1" ColumnDefinitions="Auto,*">
+      <Grid x:Name="SidebarSlot" Width="0">
+        <Grid x:Name="Sidebar" HorizontalAlignment="Right" Background="{ThemeResource LayerFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource SystemControlForegroundTransparentBrush}" BorderThickness="0,0,1,0"
+              Padding="12" RowDefinitions="*,Auto" RowSpacing="12">
           <ScrollViewer x:Name="MachineBrowser" AutomationProperties.Name="Machines" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="MachineGroups" Spacing="6" />
           </ScrollViewer>
@@ -96,12 +96,15 @@
             </Button>
           </Grid>
         </Grid>
-      </SplitView.Pane>
+      </Grid>
 
-      <Border x:Name="WorkspaceFrame" AutomationProperties.Name="Terminal workspace"
+      <Border x:Name="WorkspaceFrame" Grid.Column="1" AutomationProperties.Name="Terminal workspace"
               Padding="4" Background="{ThemeResource TabViewItemHeaderBackgroundSelected}">
-        <Border x:Name="PaneHost" Background="#282c34" CornerRadius="4" />
+        <!-- Keep the rounded clip on the viewport: PaneHost can be wider during a sidebar slide. -->
+        <Border CornerRadius="4">
+          <Border x:Name="PaneHost" Background="#282c34" />
+        </Border>
       </Border>
-    </SplitView>
+    </Grid>
   </Grid>
 </Window>

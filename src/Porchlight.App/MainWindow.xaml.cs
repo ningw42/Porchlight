@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Animation;
 using Porchlight.Core;
 using Windows.Graphics;
 
@@ -106,14 +107,80 @@ public sealed partial class MainWindow : Window
         finally { busy = false; Controls(); }
     }
 
-    double SidebarHeaderWidth(bool isOpen, double paneWidth) => isOpen ? paneWidth : double.NaN;
+    readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
+    Storyboard? sidebarAnimation;
+    SwapChainPanel? expandingSurface;
 
     void LayoutSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        // Even in a narrow window an open pane sits beside its workspace, never over the tabs.
-        Workspace.OpenPaneLength = Math.Min(280, e.NewSize.Width / 2);
+        Sidebar.Width = Math.Min(280, e.NewSize.Width / 2);
         if (e.NewSize.Width < 800 && (e.PreviousSize.Width == 0 || e.PreviousSize.Width >= 800))
-            Workspace.IsPaneOpen = false;
+            SidebarToggle.IsChecked = false;
+        UpdateSidebar(animate: false);
+    }
+
+    void SidebarToggled(object sender, RoutedEventArgs e)
+    {
+        if (SidebarSlot?.IsLoaded == true) UpdateSidebar(animate: !options.NoSidebarAnimation);
+    }
+
+    void UpdateSidebar(bool animate)
+    {
+        bool open = SidebarToggle.IsChecked == true;
+        double from = SidebarSlot.ActualWidth, to = open ? Sidebar.Width : 0;
+        if (sidebarAnimation is { } previous)
+        {
+            previous.Completed -= SidebarAnimationCompleted;
+            previous.Stop();
+            sidebarAnimation = null;
+        }
+        if (expandingSurface is { } held)
+        {
+            held.ClearValue(FrameworkElement.MinWidthProperty);
+            expandingSurface = null;
+        }
+        SidebarSlot.Width = to;
+        if (!animate || from == to || !uiSettings.AnimationsEnabled)
+        {
+            Sidebar.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+            PaneHost.Width = double.NaN;
+            PaneHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+            return;
+        }
+
+        Sidebar.Visibility = Visibility.Visible;
+        // On expansion move column one with the divider, but don't shrink the swap chain until
+        // its origin has arrived. Otherwise DWM can show the narrow buffer at the old origin.
+        // Hold only the drawing surface so the padding and scrollbar still fit.
+        // Cleanup uses ClearValue, so don't replace an existing local MinWidth or binding.
+        if (open && pane?.FindName("SwapChainPanel") is SwapChainPanel { ActualWidth: > 0 } surface &&
+            surface.ReadLocalValue(FrameworkElement.MinWidthProperty) == DependencyProperty.UnsetValue)
+        {
+            expandingSurface = surface;
+            surface.MinWidth = surface.ActualWidth;
+            PaneHost.Width = double.NaN;
+            PaneHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        }
+        else
+        {
+            // Collapse reveals the wide grid from the left. If there is no known drawing
+            // surface to hold on expansion, clip the whole host from the right instead.
+            PaneHost.Width = Math.Max(0, Workspace.ActualWidth - WorkspaceFrame.Padding.Left - WorkspaceFrame.Padding.Right);
+            PaneHost.HorizontalAlignment = open ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        }
+        var slide = new DoubleAnimation { From = from, To = to, Duration = TimeSpan.FromMilliseconds(open ? 220 : 140),
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }, EnableDependentAnimation = true };
+        Storyboard.SetTarget(slide, SidebarSlot);
+        Storyboard.SetTargetProperty(slide, "Width");
+        var animation = sidebarAnimation = new Storyboard();
+        animation.Children.Add(slide);
+        animation.Completed += SidebarAnimationCompleted;
+        animation.Begin();
+    }
+
+    void SidebarAnimationCompleted(object? sender, object e)
+    {
+        if (sender is Storyboard finished && finished == sidebarAnimation) UpdateSidebar(animate: false);
     }
 
     void RefreshList(CoreSession s, bool initial = false, bool useAvailableLayout = false)

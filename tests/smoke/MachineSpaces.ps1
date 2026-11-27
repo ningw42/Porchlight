@@ -4,7 +4,7 @@ using namespace System.Windows.Automation
 using namespace System.IO.Pipes
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$Exe, [ValidateRange(0,96)][int]$MeasureSwitchTabs = 0,
-    [ValidateSet('Default','Select','Browse')][string]$Startup = 'Default', [switch]$CheckFocus)
+    [ValidateSet('Default','Select','Browse')][string]$Startup = 'Default', [switch]$CheckFocus, [switch]$CheckSidebarPixels)
 $ErrorActionPreference = 'Stop'
 $exePath = (Get-Item -LiteralPath $Exe).FullName
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
@@ -24,12 +24,7 @@ public static class PorchlightChrome {
 
 . "$PSScriptRoot/Find-TerminalItem.ps1"
 
-# Bind before starting the viewer. One hello and one subscription on this pipe; no real core or program.
-$name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
-$pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
-$state = [hashtable]::Synchronized(@{ extraMachineState=$null; catalogEdit=$null; closing=$false; expectDetach=$false
-    nextTerminal=$null; activeAddress=$null; measureTabs=$MeasureSwitchTabs; deferLocalLayout=($Startup -eq 'Select') })
-$viewer = $peer = $root = $null
+if ($MeasureSwitchTabs -and $CheckSidebarPixels) { throw 'Run the tab benchmark and sidebar pixel check separately.' }
 $serve = {
     param($pipe, $state)
     $ErrorActionPreference = 'Stop'
@@ -39,6 +34,14 @@ $serve = {
     }
     function WriteFrame([uint32]$channel, [byte]$kind, [byte[]]$bytes) {
         $writer.Write($channel); $writer.Write($kind); $writer.Write($bytes.Length); $writer.Write($bytes)
+    }
+    function PaintCells($rows, [bool]$wide = $false) {
+        # Keep row one for the banner. Cyan marks the leading cells, magenta the body. Only a
+        # fresh wide repaint can put yellow at the trailing marker; a narrow repaint uses green.
+        $ink = if ($wide) { "255;255;0" } else { "0;255;0" }
+        $row = "`e[48;2;0;255;255m  `e[48;2;255;0;255m`e[K`e[$($state.columns-2)G`e[48;2;${ink}m  "
+        $fill = (2..$rows | ForEach-Object { "`e[$($_);1H$row" }) -join ''
+        WriteFrame $active 0 ($utf8.GetBytes("$fill`e[0m`e[H"))
     }
     function WriteEvent($e) {
         $event = @{ method='event'; params=$e } | ConvertTo-Json -Depth 8 -Compress
@@ -99,7 +102,18 @@ $serve = {
                     } elseif ($state.nextTerminal) { $holdingClose = [Diagnostics.Stopwatch]::StartNew() }
                     else { throw "Unrequested CLOSE on channel $active" }
                 }
-                3 { if ($n -ne 4) { throw 'Invalid terminal resize' } }
+                3 {
+                    if ($n -ne 4) { throw 'Invalid terminal resize' }
+                    $previous = $state.columns
+                    $state.columns = [BitConverter]::ToUInt16($body, 0)
+                    $state.resizeCount++
+                    $wide = $state.columns -gt $previous
+                    # On shrink, null leaves renderer flashes exposed; zero requests an immediate fixture repaint.
+                    if ($state.paintCells -and ($wide -or $null -ne $state.repaintDelayMs)) {
+                        if ($wide -and $state.repaintDelayMs) { [Threading.Thread]::Sleep([int]$state.repaintDelayMs) }
+                        PaintCells ([BitConverter]::ToUInt16($body, 2)) $wide
+                    }
+                }
                 4 { if ($n -ne 1 -or $body[0] -gt 1) { throw 'Invalid terminal focus' } }
                 default { throw "Unexpected frame kind $kind on channel $channel" }
             }
@@ -148,6 +162,7 @@ $serve = {
                     throw "Unexpected terminal.attach: $address (authorized selection: '$($state.nextTerminal)')"
                 }
                 $active = $nextChannel++; $state.activeAddress = $address; $state.nextTerminal = $null
+                $state.columns = $request.params.cols
                 $result = @{ channel=$active; terminal=$targets[$address] }
             }
             'terminal.kill' {
@@ -202,6 +217,7 @@ $serve = {
         WriteFrame 0 0 (Reply $request.id $result)
         if ($request.method -ceq 'terminal.attach') {
             WriteFrame $active 0 ($utf8.GetBytes("Fixture $address`r`n"))
+            if ($state.paintCells) { PaintCells $request.params.rows }
             if ($deferredLayout) { WriteFrame 0 0 $deferredLayout; $deferredLayout = $null }
         }
     }
@@ -291,6 +307,29 @@ function SelectedTabSides($label) {
     $tab = $item.Current.BoundingRectangle; $glyph = $close.Current.BoundingRectangle
     if ($glyph -and !$glyph.IsEmpty -and !$tab.IsEmpty) {
         [pscustomobject]@{ Left=$glyph.Left - $tab.Left; Right=$tab.Right - $glyph.Right }
+    }
+}
+# Sample the moving control, not just the two settled layouts. An inline SplitView can give
+# the terminal its final width and then translate it a whole sidebar-width off its right edge.
+function ToggleSidebarWithViewer {
+    $frame = FindId WorkspaceFrame
+    $term = (FindId PaneHost).FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
+    $before = $frame.Current.BoundingRectangle; $right = $term.Current.BoundingRectangle.Right
+    $resizes = $state.resizeCount; $columns = $state.columns; $closingSidebar = $toggle.Current.ToggleState -eq 'On'
+    $toggle.Toggle()
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $bounds = $frame.Current.BoundingRectangle
+        if ([Math]::Abs($bounds.Right - $before.Right) -gt 1 -or [Math]::Abs($term.Current.BoundingRectangle.Right - $right) -gt 1) {
+            throw 'Sidebar toggle moved the right edge of the workspace or its terminal'
+        }
+        Start-Sleep -Milliseconds 5
+    } while ($clock.ElapsedMilliseconds -lt 450)
+    [void](WaitFor 'sidebar grid resize' { $state.resizeCount -gt $resizes })
+    if (($state.resizeCount - $resizes) -ne 1) { throw 'Expected one grid resize, not a resize for each animation frame' }
+    $direction = if ($closingSidebar) { 1 } else { -1 }
+    if (($before.Left - $bounds.Left) * $direction -le 0 -or ($state.columns - $columns) * $direction -le 0) {
+        throw 'The left workspace edge or terminal column count did not follow the sidebar'
     }
 }
 function CaptionFits($expectedHeight) {
@@ -394,26 +433,7 @@ function CommitTerminal($terminals, $address) {
     })
 }
 
-try {
-    $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
-    $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
-    $start.ArgumentList.Add("--pipe=\\.\pipe\$name")
-    if ($Startup -ne 'Default') { $start.ArgumentList.Add('--select=t76') }
-    if ($Startup -eq 'Browse') { $start.ArgumentList.Add('--browse') }
-    $startupTerminal = switch ($Startup) { 'Default' { 't74' } 'Select' { 't76' } 'Browse' { $null } }
-    if ($startupTerminal) { AuthorizeAttach $startupTerminal }
-    $viewer = [Diagnostics.Process]::Start($start)
-    $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
-    $root = [AutomationElement]::FromHandle($hwnd)
-    if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
-    if ($CheckFocus) {
-        # Allow startup auto-selection only after the fixture owns keyboard focus, not in a background window.
-        [void](WaitFor 'foreground fixture window for keyboard focus checks' {
-            [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
-        })
-    }
-    $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
-    if ($CheckFocus -and $startupTerminal) { CheckTerminalFocus $startupTerminal } # No click or tab switch at launch.
+function CheckMachineSpaces {
     $toggle = Pattern SidebarToggle ([TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne 'On') { $toggle.Toggle() } # Narrow windows start collapsed.
     CheckScope core-local Work $localWork $startupTerminal # No manual tab selection at launch.
@@ -478,7 +498,7 @@ try {
 
     $openSides = WaitFor 'selected tab outline with the sidebar open' { SelectedTabSides $personal.t75 }
     $toggleBounds = (FindId SidebarToggle).Current.BoundingRectangle
-    $toggle.Toggle()
+    ToggleSidebarWithViewer
     [void](WaitFor 'hidden sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
         $toggle.Current.ToggleState -eq 'Off' -and (!$group -or $group.Current.IsOffscreen) -and
@@ -490,7 +510,12 @@ try {
         $sides -and [Math]::Abs(($sides.Left - $openSides.Left) - 4 * $scale) -le 1 -and
             [Math]::Abs($sides.Right - $openSides.Right) -le 1
     })
-    $toggle.Toggle()
+    if ($CheckSidebarPixels) {
+        $timings = & "$PSScriptRoot/Test-SidebarPixels.ps1" -Hwnd $hwnd -Frame (FindId WorkspaceFrame) -Toggle $toggle `
+            -State $state -Instant:$Instant -Baseline $Baseline
+        if ($Instant) { CloseFixture; return $timings }
+    }
+    ToggleSidebarWithViewer
     [void](WaitFor 'visible sidebar with toggle unmoved' {
         $group = FindId MachineGroup-core-studio
         $toggle.Current.ToggleState -eq 'On' -and $group -and !$group.Current.IsOffscreen -and
@@ -581,17 +606,56 @@ try {
             (SidebarStatus) -ceq 'Program killed.'
     })
     SelectSpace core-local Work $localWork t73
+    CloseFixture
+}
+
+function CloseFixture {
     $state.closing = $true
     (Pattern Close ([InvokePattern]::Pattern)).Invoke()
     if (!$viewer.WaitForExit(5000)) { throw 'Viewer did not close normally' }
     if ($viewer.ExitCode -ne 0) { throw "Viewer exit code $($viewer.ExitCode)" }
     if (!(Wait-Job $peer -Timeout 5)) { throw 'Fixture did not see viewer disconnect' }
     Receive-Job $peer
-} finally {
+}
+
+function RunFixture([switch]$Instant, $Baseline) {
+    # Bind before starting the viewer. One hello and one subscription on this pipe; no real core or program.
+    $name = 'porchlight-smoke-' + [guid]::NewGuid().ToString('N')
+    $pipe = [NamedPipeServerStream]::new($name, 'InOut', 1, 'Byte', 'Asynchronous,CurrentUserOnly')
+    $state = [hashtable]::Synchronized(@{ extraMachineState=$null; catalogEdit=$null; closing=$false; expectDetach=$false
+        nextTerminal=$null; activeAddress=$null; resizeCount=0; columns=0; paintCells=$CheckSidebarPixels.IsPresent; measureTabs=$MeasureSwitchTabs; deferLocalLayout=($Startup -eq 'Select') })
+    $viewer = $peer = $root = $null
     try {
-        if ($viewer -and !$viewer.HasExited) { $viewer.Kill(); $viewer.WaitForExit() }
+        $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
+        $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
+        $start.ArgumentList.Add("--pipe=\\.\pipe\$name")
+        if ($Instant) { $start.ArgumentList.Add('--no-sidebar-animation') }
+        if ($Startup -ne 'Default') { $start.ArgumentList.Add('--select=t76') }
+        if ($Startup -eq 'Browse') { $start.ArgumentList.Add('--browse') }
+        $startupTerminal = switch ($Startup) { 'Default' { 't74' } 'Select' { 't76' } 'Browse' { $null } }
+        if ($startupTerminal) { AuthorizeAttach $startupTerminal }
+        $viewer = [Diagnostics.Process]::Start($start)
+        $hwnd = WaitFor 'viewer HWND' { $viewer.Refresh(); if ($viewer.MainWindowHandle -ne [IntPtr]::Zero) { $viewer.MainWindowHandle } }
+        $root = [AutomationElement]::FromHandle($hwnd)
+        if ($root.Current.ProcessId -ne $viewer.Id) { throw 'Wrong HWND owner' }
+        if ($CheckFocus) {
+            # Allow startup auto-selection only after the fixture owns keyboard focus, not in a background window.
+            [void](WaitFor 'foreground fixture window for keyboard focus checks' {
+                [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
+            })
+        }
+        $peer = Start-ThreadJob -ScriptBlock $serve -ArgumentList $pipe,$state
+        if ($CheckFocus -and $startupTerminal) { CheckTerminalFocus $startupTerminal } # No click or tab switch at launch.
+        CheckMachineSpaces
     } finally {
-        $pipe.Dispose(); if ($peer) { Remove-Job $peer -Force }; if ($viewer) { $viewer.Dispose() }
+        try {
+            if ($viewer -and !$viewer.HasExited) { $viewer.Kill(); $viewer.WaitForExit() }
+        } finally {
+            $pipe.Dispose(); if ($peer) { Remove-Job $peer -Force }; if ($viewer) { $viewer.Dispose() }
+        }
     }
 }
-'Machine/space sidebar and terminal tab switching smoke test passed.'
+
+$reference = if ($CheckSidebarPixels) { RunFixture -Instant }
+RunFixture -Baseline $reference
+if (!$MeasureSwitchTabs) { 'Machine/space sidebar and terminal tab switching smoke test passed.' }

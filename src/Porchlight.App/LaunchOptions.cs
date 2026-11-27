@@ -6,6 +6,7 @@ internal sealed class LaunchOptions
 {
     public string? Pipe, Machine, Select;
     public bool Browse { get; private set; }
+    public bool NoSidebarAnimation { get; private set; }
     public TerminalFont Font { get; private set; } = new();
     public bool ImportedFont { get; private set; }
     public TerminalScheme? Scheme { get; private set; }
@@ -18,6 +19,7 @@ internal sealed class LaunchOptions
         foreach (var arg in args)
         {
             if (arg == "--browse") { options.Browse = true; continue; }
+            if (arg == "--no-sidebar-animation") { options.NoSidebarAnimation = true; continue; }
             var pair = arg.Split('=', 2);
             if (pair.Length != 2 || string.IsNullOrWhiteSpace(pair[1])) throw new FormatException("Expected --option=value. See README.");
             switch (pair[0])

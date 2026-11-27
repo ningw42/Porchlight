@@ -122,6 +122,8 @@ public sealed partial class MainWindow
         var bridge = connection; var control = pane;
         connection = null; pane = null; insidePane = false;
         if (bridge != null) await bridge.CloseAsync();
+        // Release any size held on the outgoing surface; mount the next viewer at its settled grid.
+        if (sidebarAnimation != null) UpdateSidebar(animate: false);
         try { control?.Close(); }
         finally { PaneHost.Child = null; }
     }
