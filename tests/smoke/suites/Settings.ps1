@@ -25,14 +25,36 @@ function OpenSettings {
     }
     $settings
 }
+function SelectSettingsPage($settings, $name) {
+    $item = WaitFor "$name navigation item" { FindId "${name}Category" $settings }
+    if ($CheckFocus) { $item.SetFocus() }
+    $item.GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
+    [void](WaitFor "$name page heading" { FindId "${name}PageHeading" $settings })
+}
+function SegmentedItems($picker) {
+    if ($picker) {
+        $picker.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::IsSelectionItemPatternAvailableProperty, $true))
+    }
+}
+function CheckAppearance($settings, $mode, $tint) {
+    [void](WaitFor "$mode color mode and tint $tint on Appearance" {
+        $picker = FindId ColorModePicker $settings
+        if (!$picker) { return }
+        $choices = @(SegmentedItems $picker)
+        $selected = $picker.GetCurrentPattern([SelectionPattern]::Pattern).Current.GetSelection()
+        $toggle = FindId TintAppSwitch $settings
+        ($choices.Current.Name -join ',') -ceq 'System,Light,Dark' -and $selected.Count -eq 1 -and $selected[0].Current.Name -ceq $mode -and
+            $toggle -and $toggle.GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq $tint
+    })
+}
 function VisibleSuggestions($settings) {
     $settings.FindFirst('Descendants', [AndCondition]::new(
         [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, 'SuggestionsList'),
         [PropertyCondition]::new([AutomationElement]::IsOffscreenProperty, $false)))
 }
-function CheckCategoryFocus($settings) {
-    [void](WaitFor 'Terminal category focused with both suggestion lists closed' {
-        (FindId TerminalCategory $settings).Current.HasKeyboardFocus -and !(VisibleSuggestions $settings)
+function CheckCategoryFocus($settings, $categoryId) {
+    [void](WaitFor "$categoryId focused with no suggestion list open" {
+        (FindId $categoryId $settings).Current.HasKeyboardFocus -and !(VisibleSuggestions $settings)
     })
 }
 function SendSettingsKey($settings, [int]$key, [int]$scan) {
@@ -238,14 +260,8 @@ function CheckSettingsLayout($settings) {
     if ([Math]::Abs($paneWidths[0] - $paneWidths[1]) -gt 2 * $scale) { throw 'Settings navigation width changed on resize' }
     [PorchlightChrome]::Resize($settingsHwnd, $original.Width, $original.Height)
 }
-function CursorOptions($settings) {
-    $picker = FindId CursorShapePicker $settings
-    if ($picker) {
-        $picker.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::IsSelectionItemPatternAvailableProperty, $true))
-    }
-}
 function CheckCursorSettings($settings) {
-    $options = @(CursorOptions $settings)
+    $options = @(SegmentedItems (FindId CursorShapePicker $settings))
     if (($options.Current.Name -join ',') -cne 'Vintage,Bar,Underscore,FilledBox,EmptyBox') { throw 'Unexpected cursor options or order' }
     foreach ($item in $options) {
         if ($item.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::IsTextPatternAvailableProperty, $true))) {
@@ -457,7 +473,7 @@ function CheckOpenTypePicker($settings) {
 
 function CheckRetainedSettings($settings, $text, $pt, $height, $face) {
     [void](WaitFor "reopened Settings: ordered families, $pt pt, features, ligatures and steady Underscore" {
-        $options = @(CursorOptions $settings)
+        $options = @(SegmentedItems (FindId CursorShapePicker $settings))
         $options.Count -eq 5 -and $options[2].GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
             (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'Off' -and
             (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Underscore cursor' -and
@@ -473,16 +489,36 @@ function CheckRetainedSettings($settings, $text, $pt, $height, $face) {
 Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Code, Consolas', '--ss01=1') -BeforeConnect {
     CheckNoGatewayControls $root
     $settings = OpenSettings # The fake peer has not even read the gateway hello.
+    if ($CheckFocus) { CheckCategoryFocus $settings AppearanceCategory }
+    CheckAppearance $settings System Off
+    if ((FindId AppearanceCategory $settings).Current.BoundingRectangle.Top -ge (FindId TerminalCategory $settings).Current.BoundingRectangle.Top) {
+        throw 'Expected Appearance above Terminal'
+    }
+    foreach ($name in 'Light','Dark') {
+        $combo = FindId "${name}SchemePicker" $settings
+        if (!$combo -or $combo.Current.ControlType -ne [ControlType]::ComboBox -or $combo.Current.IsEnabled -or $combo.Current.Name -cne "$name color scheme") {
+            throw "Expected a disabled $name color scheme selector"
+        }
+    }
+    $modes = @(SegmentedItems (FindId ColorModePicker $settings))
+    $modes[2].GetCurrentPattern([SelectionItemPattern]::Pattern).Select() # Dark in the verified order.
+    (FindId TintAppSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Toggle()
+    SelectSettingsPage $settings Terminal
     [void](WaitForTerminalText TerminalPreviewSample $settings $previewLines)
     [void](WaitFor 'initial blinking Vintage cursor' {
-        (CursorOptions $settings)[0].GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
+        (SegmentedItems (FindId CursorShapePicker $settings))[0].GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
             (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'On' -and
             (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Blinking Vintage cursor'
     })
     # Edit with no pane or gateway session: the next attachment must use these choices.
-    (CursorOptions $settings)[1].GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
+    (SegmentedItems (FindId CursorShapePicker $settings))[1].GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
     (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Toggle()
-    [void](WaitFor 'steady Bar cursor before close' { (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Bar cursor' })
+    [void](WaitFor 'steady Bar cursor before leaving Terminal' { (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Bar cursor' })
+    SelectSettingsPage $settings Appearance
+    CheckAppearance $settings Dark On
+    SelectSettingsPage $settings Terminal
+    [void](WaitForTerminalText TerminalPreviewSample $settings $previewLines)
+    [void](WaitFor 'steady Bar cursor after returning to Terminal' { (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Bar cursor' })
     CloseSettings $settings
 } -Test {
     CheckNoGatewayControls $root
@@ -493,10 +529,12 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     $liveHeight = WaitFor 'initial live terminal cell height' { TerminalRowHeight $live 'Fixture' }
     CheckLiveCursor t75 Steady Bar # Edited before any connection existed.
     $settings = OpenSettings
+    CheckAppearance $settings Dark On
+    SelectSettingsPage $settings Terminal
     $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
     CheckPreviewPointer $settings $text
     if ($CheckFocus) {
-        CheckCategoryFocus $settings
+        CheckCategoryFocus $settings TerminalCategory
         # The preview sits between navigation and the first editor. Tab must skip it.
         SendSettingsKey $settings 0x09 0x0f
         [void](WaitFor 'Tab skips the preview and enters the font picker' {
@@ -548,6 +586,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CloseSettings $settings
     foreach ($cycle in 1..6) {
         $settings = OpenSettings
+        SelectSettingsPage $settings Terminal
         $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
         CheckRetainedSettings $settings $text $pt $height $face
         if ($cycle -eq 1) { CheckLiveCursor t75 Blinking Bar; CheckProgramColor t75 } # Opening Settings is not an edit.
@@ -574,6 +613,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     [void](WaitFor 'later mount uses the edited font face and cell height' { (NativeFace $next) -ceq $face -and (TerminalRowHeight $next 'Fixture') -eq $height })
     CheckLiveCursor t77 Steady Underscore # A fresh pane gets the saved steady underline, not t75's override.
     $settings = OpenSettings
+    SelectSettingsPage $settings Terminal
     $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
     CheckRetainedSettings $settings $text $pt $height $face
     CheckLiveCursor t77 Blinking Underscore -programBlinks

@@ -12,6 +12,9 @@
       <TextBlock Text="Settings" Style="{ThemeResource SubtitleTextBlockStyle}" Margin="16,20,0,12" />
     </NavigationView.PaneHeader>
     <NavigationView.MenuItems>
+      <NavigationViewItem x:Name="AppearanceCategory" Content="Appearance">
+        <NavigationViewItem.Icon><FontIcon Glyph="&#xE771;" /></NavigationViewItem.Icon>
+      </NavigationViewItem>
       <NavigationViewItem x:Name="TerminalCategory" Content="Terminal">
         <NavigationViewItem.Icon><FontIcon Glyph="&#xE756;" /></NavigationViewItem.Icon>
       </NavigationViewItem>

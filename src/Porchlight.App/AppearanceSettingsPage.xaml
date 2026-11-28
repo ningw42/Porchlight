@@ -1,0 +1,28 @@
+<Page x:Class="Porchlight.App.AppearanceSettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+    xmlns:local="using:Porchlight.App">
+  <ScrollViewer MaxWidth="840" VerticalScrollBarVisibility="Auto">
+    <StackPanel Padding="24">
+      <TextBlock x:Name="AppearancePageHeading" Text="Appearance" Margin="0,0,0,16" Style="{ThemeResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+      <controls:SettingsCard Header="Color mode">
+        <local:AccessibleSegmented x:Name="ColorModePicker" AutomationProperties.Name="Color mode" SelectionMode="Single"
+                                   SelectedIndex="{x:Bind Preferences.ColorModeIndex, Mode=TwoWay}">
+          <x:String>System</x:String>
+          <x:String>Light</x:String>
+          <x:String>Dark</x:String>
+        </local:AccessibleSegmented>
+      </controls:SettingsCard>
+      <controls:SettingsCard Header="Light color scheme">
+        <ComboBox x:Name="LightSchemePicker" AutomationProperties.Name="Light color scheme" MinWidth="168" IsEnabled="False" PlaceholderText="No color schemes" />
+      </controls:SettingsCard>
+      <controls:SettingsCard Header="Dark color scheme">
+        <ComboBox x:Name="DarkSchemePicker" AutomationProperties.Name="Dark color scheme" MinWidth="168" IsEnabled="False" PlaceholderText="No color schemes" />
+      </controls:SettingsCard>
+      <controls:SettingsCard Header="Tint app with terminal colors">
+        <ToggleSwitch x:Name="TintAppSwitch" AutomationProperties.Name="Tint app with terminal colors" MinWidth="0" OnContent="" OffContent=""
+                      IsOn="{x:Bind Preferences.TintApp, Mode=TwoWay}" />
+      </controls:SettingsCard>
+    </StackPanel>
+  </ScrollViewer>
+</Page>

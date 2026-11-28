@@ -79,6 +79,8 @@ public sealed partial class TerminalSettingsPage : Page
         ShowInitialAppearance();
     }
 
+    protected override void OnNavigatedFrom(NavigationEventArgs e) => ClosePreview();
+
     internal void ClosePreview()
     {
         context = null;

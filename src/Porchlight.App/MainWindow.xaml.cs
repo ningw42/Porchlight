@@ -13,6 +13,7 @@ public sealed partial class MainWindow : Window, ITerminalAppearanceTarget
     readonly SpaceTabMemory spaceTabs = new();
     LaunchOptions options = new();
     CoreSession? session;
+    internal AppearancePreferences AppearancePreferences { get; } = new();
     SettingsWindow? settingsWindow;
     HerdMachine? selectedMachine;
     TerminalSpace? selectedSpace;
@@ -276,12 +277,15 @@ public sealed partial class MainWindow : Window, ITerminalAppearanceTarget
         ShowScope(catalog, machine, space, enterSpace: true);
     }
 
+    internal SettingsWindow.EditorContext CreateTerminalEditorContext(ulong settingsHwnd) =>
+        new(options.Font, appearance, this, settingsHwnd);
+
     void OpenSettings(object sender, RoutedEventArgs e)
     {
         if (closing) return;
         if (settingsWindow == null)
         {
-            settingsWindow = new SettingsWindow(this, options.Font, appearance);
+            settingsWindow = new SettingsWindow(this);
             settingsWindow.Closed += (_, _) => settingsWindow = null;
         }
         settingsWindow.Activate();
