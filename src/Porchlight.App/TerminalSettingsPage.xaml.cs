@@ -1,9 +1,12 @@
+using CommunityToolkit.WinUI;
 using CommunityToolkit.WinUI.Controls;
 using Microsoft.Graphics.Canvas.Text;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Navigation;
+using Porchlight.Core.Configuration;
 using System.Collections.ObjectModel;
 
 namespace Porchlight.App;
@@ -11,8 +14,16 @@ namespace Porchlight.App;
 public sealed partial class TerminalSettingsPage : Page
 {
     readonly ObservableCollection<string> families = [];
+    readonly ObservableCollection<string> selectedTags = [];
     readonly string[] installedFonts;
-    string launchFace = "";
+    string launchFace = "", previewFace = "";
+    FontFeatureOverrides? features;
+    string? probedFamily;
+    CancellationTokenSource? probing;
+    Dictionary<string, FontFeatureCandidate> candidates = new(StringComparer.Ordinal);
+    Popup? featurePopup;
+    long offsetSubscription;
+    bool sourceReversed;
 
     public TerminalSettingsPage()
     {
@@ -20,13 +31,19 @@ public sealed partial class TerminalSettingsPage : Page
         installedFonts = CanvasTextFormat.GetSystemFontFamilies().Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
         TerminalFontPicker.ItemsSource = families;
-        families.CollectionChanged += (_, _) => UpdatePreview();
+        FeaturePicker.ItemsSource = selectedTags;
+        families.CollectionChanged += (_, _) => UpdateFamilies();
+        Loaded += (_, _) => UpdateFamilies();
+        Unloaded += (_, _) => { probing?.Cancel(); probing = null; probedFamily = null; TrackFeaturePopup(null); };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
-        launchFace = (string)e.Parameter;
-        UpdatePreview();
+        var font = (TerminalFont)e.Parameter;
+        launchFace = font.Face;
+        features = new(font.Features);
+        RestoreFeatureTokens();
+        UpdateFamilies();
     }
 
     void Suggest(string query)
@@ -49,13 +66,174 @@ public sealed partial class TerminalSettingsPage : Page
         else args.Item = name;
     }
 
-    void UpdatePreview()
+    void UpdateFamilies()
     {
-        // The launch string can contain quoted family names with commas. Leave it intact.
-        var face = families.Count == 0 ? launchFace : string.Join(", ", families);
-        AppearancePreview.FontFamily = new FontFamily(face);
+        if (features == null) return;
+        previewFace = families.Count == 0 ? launchFace : FontFamilyList.Format(families);
+        AppearancePreview.Update(previewFace, features.Values);
         ResetFontsButton.IsEnabled = families.Count != 0;
         Suggest("");
+        // For inherited settings an earlier listed family may not be installed.
+        var primary = families.FirstOrDefault() ?? FontFamilyList.Parse(launchFace)
+            .FirstOrDefault(name => Array.BinarySearch(installedFonts, name, StringComparer.OrdinalIgnoreCase) >= 0) ?? "";
+        if (probedFamily == primary) return; // Editing a fallback changes the preview, not the candidates.
+        probedFamily = primary;
+        ProbeFeatures(primary);
+    }
+
+    async void ProbeFeatures(string family)
+    {
+        probing?.Cancel();
+        using var request = new CancellationTokenSource();
+        probing = request;
+        candidates.Clear();
+        FeaturePicker.Text = "";
+        SuggestFeatures("");
+        FeatureStatus.Visibility = Visibility.Collapsed;
+        LigatureExample.Visibility = Visibility.Collapsed;
+        try
+        {
+            if (family.Length == 0) { ShowFeatureStatus("No installed font in the list."); return; }
+            var result = await Task.Run(() => FontFeatureProbe.Discover(family, request.Token), request.Token);
+            if (request.IsCancellationRequested) return;
+            if (result.LigatureSample is { } sample)
+            {
+                LigatureExample.SetLigatureSample(family, sample);
+                LigatureExample.Visibility = Visibility.Visible;
+            }
+            if (result.Features.Count == 0) { ShowFeatureStatus($"No individual OpenType features found in {family}."); return; }
+            candidates = result.Features.ToDictionary(c => c.Tag, StringComparer.Ordinal);
+            SuggestFeatures(FeaturePicker.Text);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            if (request.IsCancellationRequested) return;
+            ShowFeatureStatus($"Couldn’t read OpenType features for {family}.");
+        }
+        finally { if (probing == request) probing = null; }
+    }
+
+    void ShowFeatureStatus(string text)
+    {
+        FeatureStatus.Text = text;
+        FeatureStatus.Visibility = Visibility.Visible;
+    }
+
+    void SuggestFeatures(string? query)
+    {
+        var prefix = query?.Trim() ?? "";
+        var matches = candidates.Values
+            .Where(c => c.Tag.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && !selectedTags.Contains(c.Tag))
+            .OrderBy(c => c.Sample is null)
+            .ThenBy(c => c.Tag, StringComparer.Ordinal)
+            .Select(c => c.Tag).ToArray();
+        // WinUI's AutoSuggestBox itself reverses the items when it opens above the editor.
+        sourceReversed = featurePopup is { VerticalOffset: < 0 };
+        if (sourceReversed) Array.Reverse(matches);
+        FeaturePicker.SuggestedItemsSource = matches;
+        if (sourceReversed && matches.Length > 0) DispatcherQueue.TryEnqueue(ScrollToFirstFeature);
+    }
+
+    void ScrollToFirstFeature()
+    {
+        if (featurePopup is { IsOpen: true, VerticalOffset: < 0, Child: FrameworkElement root } &&
+            root.FindDescendant<ListView>() is { Items.Count: > 0 } list)
+            list.ScrollIntoView(list.Items[0], ScrollIntoViewAlignment.Leading);
+    }
+
+    void TrackFeaturePopup(Popup? popup)
+    {
+        if (featurePopup == popup) return;
+        featurePopup?.UnregisterPropertyChangedCallback(Popup.VerticalOffsetProperty, offsetSubscription);
+        featurePopup = popup;
+        if (popup != null)
+            offsetSubscription = popup.RegisterPropertyChangedCallback(Popup.VerticalOffsetProperty, (_, _) =>
+            {
+                // Re-publish after WinUI finishes positioning the popup, not during layout.
+                if (sourceReversed != (popup.VerticalOffset < 0)) DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (featurePopup == popup && popup.IsOpen && sourceReversed != (popup.VerticalOffset < 0))
+                        SuggestFeatures(FeaturePicker.Text);
+                });
+            });
+    }
+
+    void FeaturePickerFocused(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is TextBox editor && editor.FindAscendant<AutoSuggestBox>() is { } box)
+        {
+            TrackFeaturePopup(box.FindDescendant<Popup>());
+            box.IsSuggestionListOpen = box.Items.Count != 0;
+        }
+    }
+
+    void FeatureQueryChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.SuggestionChosen) SuggestFeatures(sender.Text);
+    }
+
+    void FeatureAdding(TokenizingTextBox sender, TokenItemAddingEventArgs args)
+    {
+        // Both typed tags and chosen suggestions are strings and take this same validation path.
+        var input = args.TokenText;
+        var candidate = candidates.GetValueOrDefault(input) ?? candidates.Values.FirstOrDefault(c =>
+            c.Tag.Equals(input, StringComparison.OrdinalIgnoreCase));
+        if (candidate == null || selectedTags.Contains(candidate.Tag)) args.Cancel = true;
+        else args.Item = candidate.Tag;
+    }
+
+    void FeatureAdded(TokenizingTextBox sender, object item) => SetFeature((string)item, true);
+    void FeatureRemoved(TokenizingTextBox sender, object item) => SetFeature((string)item, false);
+
+    void SetFeature(string tag, bool enabled)
+    {
+        features!.SetEnabled(tag, enabled);
+        SuggestFeatures("");
+        UpdateFeatures();
+    }
+
+    void FeatureSuggestionChanged(FrameworkElement sender, DataContextChangedEventArgs args)
+    {
+        if (args.NewValue is not string tag || !candidates.TryGetValue(tag, out var candidate)) return;
+        var row = (Grid)sender;
+        var comparison = (FeatureComparison)row.Children[1];
+        comparison.SetSample(probedFamily!, tag, candidate.Sample, candidate.Italic);
+        AutomationProperties.SetAutomationId(row, "FeatureSuggestion-" + tag);
+        AutomationProperties.SetName(row, tag);
+        var help = candidate.Sample == null ? "No matching sample found" : $"Off and on: {candidate.Sample}";
+        AutomationProperties.SetHelpText(row, help);
+        ToolTipService.SetToolTip(row, help);
+    }
+
+    void LigaturesToggled(object sender, RoutedEventArgs e)
+    {
+        // Initializing or resetting the switch must not normalize a mixed launch map.
+        if (features == null || CodingLigaturesSwitch.IsOn == features.LigaturesEnabled) return;
+        features.SetLigaturesEnabled(CodingLigaturesSwitch.IsOn);
+        UpdateFeatures();
+    }
+
+    void UpdateFeatures()
+    {
+        AppearancePreview.Update(previewFace, features!.Values);
+        ResetFeaturesButton.IsEnabled = features.CanReset;
+    }
+
+    void ResetFeatures(object sender, RoutedEventArgs e)
+    {
+        features!.Reset();
+        RestoreFeatureTokens();
+        SuggestFeatures("");
+        UpdateFeatures();
+    }
+
+    void RestoreFeatureTokens()
+    {
+        // Don't issue a collection Reset: the token control interleaves its own editable items.
+        while (selectedTags.Count > 0) selectedTags.RemoveAt(selectedTags.Count - 1);
+        foreach (var tag in features!.EnabledIndividualTags) selectedTags.Add(tag);
+        CodingLigaturesSwitch.IsOn = features.LigaturesEnabled;
+        FeaturePicker.Text = "";
     }
 
     async void ResetFonts(object sender, RoutedEventArgs e) => await TerminalFontPicker.ClearAsync();

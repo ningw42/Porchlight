@@ -126,7 +126,7 @@ function CommitTerminal($terminals, $address) {
 
 # Each invocation owns its viewer, pipe, peer and mutable expectations. Suite scriptblocks
 # run in this scope chain so UI helpers always address this viewer and its authorized channel.
-function Invoke-SmokeFixture([Parameter(Mandatory)][scriptblock]$Test, [scriptblock]$BeforeConnect, [switch]$Instant, [switch]$PaintCells) {
+function Invoke-SmokeFixture([Parameter(Mandatory)][scriptblock]$Test, [scriptblock]$BeforeConnect, [switch]$Instant, [switch]$PaintCells, [string[]]$FontArguments = @()) {
     # Expected wire routes and their UI labels are deliberately distinct on the relayed core.
     $localWork = @{ t74='t74 · local twin · pwsh'; t76='t76 · work sibling' }
     $remoteWork = @{ 'core-studio/t74'='studio/t74 · remote twin'; 'core-studio/t76'='studio/t76 · remote sibling' }
@@ -142,6 +142,7 @@ function Invoke-SmokeFixture([Parameter(Mandatory)][scriptblock]$Test, [scriptbl
         $start = [Diagnostics.ProcessStartInfo]::new($exePath); $start.UseShellExecute = $false
         $start.Environment['HERDR_APP_HOME'] = Join-Path ([IO.Path]::GetTempPath()) $name # private, no programs.json overrides
         $start.ArgumentList.Add("--pipe=\\.\pipe\$name")
+        foreach ($arg in $FontArguments) { $start.ArgumentList.Add($arg) }
         if ($Instant) { $start.ArgumentList.Add('--no-sidebar-animation') }
         if ($Startup -ne 'Default') { $start.ArgumentList.Add('--select=t76') }
         if ($Startup -eq 'Browse') { $start.ArgumentList.Add('--browse') }

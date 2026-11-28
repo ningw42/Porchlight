@@ -6,6 +6,12 @@
     <DataTemplate x:Key="FontNameTemplate" x:DataType="x:String">
       <TextBlock Text="{x:Bind}" FontFamily="{x:Bind}" />
     </DataTemplate>
+    <DataTemplate x:Key="FeatureSuggestionTemplate" x:DataType="x:String">
+      <Grid ColumnDefinitions="44,*" ColumnSpacing="12" DataContextChanged="FeatureSuggestionChanged">
+        <TextBlock Text="{x:Bind}" VerticalAlignment="Center" />
+        <local:FeatureComparison Grid.Column="1" HorizontalAlignment="Left" />
+      </Grid>
+    </DataTemplate>
   </Page.Resources>
   <ScrollViewer MaxWidth="840" VerticalScrollBarVisibility="Auto">
     <StackPanel Padding="24" Spacing="16">
@@ -27,6 +33,33 @@
             <FontIcon Glyph="&#xE777;" FontSize="16" />
           </Button>
         </Grid>
+      </controls:SettingsCard>
+      <controls:SettingsCard Header="Coding ligatures">
+        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+          <local:FeatureComparison x:Name="LigatureExample" Visibility="Collapsed" />
+          <ToggleSwitch x:Name="CodingLigaturesSwitch" AutomationProperties.Name="Coding ligatures"
+                        Toggled="LigaturesToggled" MinWidth="0" OnContent="" OffContent="" />
+        </StackPanel>
+      </controls:SettingsCard>
+      <controls:SettingsCard x:Name="FeaturesCard" Header="OpenType features" ContentAlignment="Vertical">
+        <StackPanel Spacing="8">
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+            <controls:TokenizingTextBox x:Name="FeaturePicker" AutomationProperties.Name="OpenType features"
+                PlaceholderText="Type a feature tag…" TokenDelimiter="," TextChanged="FeatureQueryChanged" GotFocus="FeaturePickerFocused"
+                TokenItemAdding="FeatureAdding" TokenItemAdded="FeatureAdded" TokenItemRemoved="FeatureRemoved"
+                SuggestedItemTemplate="{StaticResource FeatureSuggestionTemplate}">
+              <controls:TokenizingTextBox.Resources>
+                <Thickness x:Key="TextBoxTopHeaderMargin">0</Thickness>
+              </controls:TokenizingTextBox.Resources>
+              <controls:TokenizingTextBox.QueryIcon><FontIconSource Glyph="&#xE721;" FontSize="12" /></controls:TokenizingTextBox.QueryIcon>
+            </controls:TokenizingTextBox>
+            <Button x:Name="ResetFeaturesButton" Grid.Column="1" Style="{StaticResource SubtleButtonStyle}" VerticalAlignment="Top" IsEnabled="False"
+                    AutomationProperties.Name="Reset ligatures and OpenType features" ToolTipService.ToolTip="Reset ligatures and features to launch settings" Click="ResetFeatures">
+              <FontIcon Glyph="&#xE777;" FontSize="16" />
+            </Button>
+          </Grid>
+          <TextBlock x:Name="FeatureStatus" Visibility="Collapsed" TextWrapping="Wrap" />
+        </StackPanel>
       </controls:SettingsCard>
     </StackPanel>
   </ScrollViewer>

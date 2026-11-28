@@ -2,16 +2,17 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Graphics;
+using Porchlight.Core.Configuration;
 
 namespace Porchlight.App;
 
 public sealed partial class SettingsWindow : Window
 {
-    readonly string launchFace;
+    readonly TerminalFont launchFont;
 
-    internal SettingsWindow(Window owner, string launchFace)
+    internal SettingsWindow(Window owner, TerminalFont launchFont)
     {
-        this.launchFace = launchFace;
+        this.launchFont = launchFont;
         InitializeComponent();
         Categories.SelectedItem = TerminalCategory;
 
@@ -28,6 +29,6 @@ public sealed partial class SettingsWindow : Window
     void CategorySelected(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItemContainer == TerminalCategory)
-            CategoryPage.Navigate(typeof(TerminalSettingsPage), launchFace);
+            CategoryPage.Navigate(typeof(TerminalSettingsPage), launchFont);
     }
 }

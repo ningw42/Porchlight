@@ -107,7 +107,104 @@ function CheckFontPicker($settings) {
     })
 }
 
-Invoke-SmokeFixture -BeforeConnect {
+function CheckOpenTypePicker($settings) {
+    $picker = WaitFor 'visible OpenType feature picker' {
+        $p = FindId FeaturePicker $settings; if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
+    }
+    $value = $picker.GetCurrentPattern([ValuePattern]::Pattern)
+    $switch = (FindId CodingLigaturesSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern)
+    $reset = FindId ResetFeaturesButton $settings
+    $listItem = [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem)
+    $fixturePid = [PropertyCondition]::new([AutomationElement]::ProcessIdProperty, $viewer.Id)
+
+    function ChipsAre([string[]]$expected) {
+        # Count token containers, not matching TextBlocks (the popup can contain the same tag).
+        if ($value.Current.Value) { return $false } # Also wait for the delimiter to be consumed.
+        $names = foreach ($item in $picker.FindAll('Children', $listItem)) {
+            if (FindId PART_RemoveButton $item) { $item.Current.Name }
+        }
+        (($names | Sort-Object) -join ',') -ceq (($expected | Sort-Object) -join ',')
+    }
+    function RemoveChip($tag) {
+        $name = [PropertyCondition]::new([AutomationElement]::NameProperty, $tag)
+        $chip = $picker.FindFirst('Children', [AndCondition]::new($listItem, $name))
+        (FindId PART_RemoveButton $chip).GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    }
+    function QueryFeatures($prefix) {
+        $edit = FindId TextBox $picker
+        $edit.SetFocus()
+        $edit.GetCurrentPattern([ValuePattern]::Pattern).SetValue($prefix)
+    }
+    function Suggestion($tag) {
+        # The popup is a descendant of this Settings window, not necessarily of its picker.
+        $row = FindId "FeatureSuggestion-$tag" $settings
+        if ($row -and !$row.Current.IsOffscreen) { $row }
+    }
+
+    [void](WaitFor 'launch ligatures on, no individual chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
+    [void](WaitFor 'verified Cascadia operator beside switch' {
+        $settings.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::Text)) |
+            Where-Object { !$_.Current.IsOffscreen -and $_.Current.Name -cmatch '^Coding ligatures off then on: [^\w\s]{2,}$' } | Select-Object -First 1
+    })
+    $switch.Toggle()
+    [void](WaitFor 'disabling ligatures is independent of feature chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'Off' -and $reset.Current.IsEnabled })
+    QueryFeatures 'ca'
+    [void](WaitFor 'ca offers case, not the grouped calt tag' { (Suggestion case) -and !(Suggestion calt) })
+    QueryFeatures 'm'
+    [void](WaitFor 'previewed matches first; the other tags remain alphabetical and selectable' {
+        $rows = @(foreach ($tag in 'mark','medi','mkmk') { Suggestion $tag })
+        if ($rows.Count -ne 3) { return }
+        $displayed = $rows | Sort-Object { $_.Current.BoundingRectangle.Top }
+        $expected = $rows | Sort-Object { [int]($_.Current.HelpText -eq 'No matching sample found') }, { $_.Current.Name }
+        ($displayed.Current.Name -join ',') -ceq ($expected.Current.Name -join ',')
+    })
+    QueryFeatures 'ss0'
+    $row = WaitFor 'ss01 has a one-grapheme off/on example rather than a whole word' {
+        $r = Suggestion ss01
+        if ($r -and $r.Current.Name -ceq 'ss01' -and $r.Current.HelpText -cmatch '^Off and on: (.+)$' -and
+            [Globalization.StringInfo]::ParseCombiningCharacters($Matches[1]).Length -eq 1) { $r }
+    }
+    $walker = [TreeWalker]::new([AndCondition]::new($fixturePid, $listItem))
+    $item = $walker.GetParent($row)
+    if (!$item -or $item.Current.ProcessId -ne $viewer.Id) { throw 'Missing fixture ListViewItem for ss01' }
+    # Invoke commits the suggestion; SelectionItem.Select can merely highlight the row.
+    $item.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'invoked ss01 suggestion committed as a chip' { ChipsAre ss01 })
+    $value.SetValue('zero,')
+    [void](WaitFor 'typed individual tag added alongside ss01' { ChipsAre zero,ss01 })
+    foreach ($invalid in 'ss01','zzzz','calt','liga','clig','dlig','hlig','rlig') {
+        $value.SetValue("$invalid,")
+        [void](WaitFor "reject '$invalid' without changing either control" { (ChipsAre zero,ss01) -and $switch.Current.ToggleState -eq 'Off' })
+    }
+
+    $fonts = FindId TerminalFontPicker $settings
+    $family = $fonts.GetCurrentPattern([ValuePattern]::Pattern)
+    $family.SetValue('Segoe MDL2 Assets,')
+    [void](WaitFor 'icon font has no tags but keeps both chips editable' {
+        $s = FindId FeatureStatus $settings
+        $s -and $s.Current.Name -ceq 'No individual OpenType features found in Segoe MDL2 Assets.' -and
+            $picker.Current.IsEnabled -and (ChipsAre zero,ss01) -and $switch.Current.ToggleState -eq 'Off'
+    })
+    $family.SetValue('Cascadia Code,')
+    $added = [PropertyCondition]::new([AutomationElement]::NameProperty, 'Cascadia Code')
+    [void](WaitFor 'fallback token committed' { $fonts.FindFirst('Children', [AndCondition]::new($listItem, $added)) })
+    RemoveChip zero
+    [void](WaitFor 'remove chip even with no candidates' { ChipsAre ss01 })
+    $value.SetValue('zero,')
+    [void](WaitFor 'fallback font cannot supply zero' { ChipsAre ss01 })
+    $fontReset = FindId ResetFontsButton $settings
+    $fontReset.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'launch font list restored' { !$fontReset.Current.IsEnabled -and (ChipsAre ss01) })
+    QueryFeatures 'ze'
+    [void](WaitFor 'launch font offers zero again' { Suggestion zero })
+    $value.SetValue('')
+    [void](WaitFor 'edited chips survive restoring the launch font' { (ChipsAre ss01) -and $reset.Current.IsEnabled })
+    $reset.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'reset restores launch switch and individual tags' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
+
+}
+
+Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Code, Consolas') -BeforeConnect {
     [void](WaitFor 'Settings available before the gateway hello' { SettingsButton })
     CheckNoGatewayControls $root
 } -Test {
@@ -117,6 +214,7 @@ Invoke-SmokeFixture -BeforeConnect {
     CheckScope core-local Personal $personal t75
     CheckSettingsLayout $settings
     CheckFontPicker $settings
+    CheckOpenTypePicker $settings
     if ($CheckFocus) {
         [void](WaitFor 'main window active with Settings open' {
             [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
