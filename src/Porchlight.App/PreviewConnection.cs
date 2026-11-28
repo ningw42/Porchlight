@@ -1,5 +1,6 @@
 using Microsoft.Terminal.TerminalConnection;
 using Microsoft.UI.Dispatching;
+using Porchlight.Core;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
 
@@ -29,7 +30,7 @@ internal sealed partial class PreviewConnection(DispatcherQueue dispatcher, Acti
             if (Volatile.Read(ref started) == 0) return;
             // Clear the previous viewport AND history; a narrower reflow may have scrolled the prompt away.
             // DEC private mode 12 controls blinking independently of the configured cursor shape.
-            var blinkMode = CursorBlink ? "\x1b[?12h" : "\x1b[?12l";
+            var blinkMode = CursorBlinkStream.Mode(CursorBlink);
             TerminalOutput?.Invoke(("\x1b[H\x1b[2J\x1b[3J\x1b[H" + Sample + blinkMode).ToCharArray());
             fit(this);
         });

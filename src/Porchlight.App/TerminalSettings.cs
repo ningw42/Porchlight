@@ -9,22 +9,24 @@ using Porchlight.Core.Configuration;
 
 namespace Porchlight.App;
 
-internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bool isDark = true) : IControlSettings
+internal sealed partial class TerminalSettings(TerminalAppearance initial, bool isDark = true) : IControlSettings
 {
     internal const CursorStyle DefaultCursorShape = CursorStyle.Vintage;
     internal const uint DefaultCursorHeight = 25;
 
-    internal static TerminalSettings Create(TerminalFont font, TerminalScheme? scheme, CursorStyle cursor = DefaultCursorShape) => new(scheme)
+    sealed class NativeFont(TerminalAppearance appearance)
     {
-        FontFace = font.Face, FontSize = font.Size, FontWeight = new() { Weight = font.Weight },
-        CellHeight = font.CellHeight, CellWidth = font.CellWidth,
-        EnableBuiltinGlyphs = font.BuiltinGlyphs, EnableColorGlyphs = font.ColorGlyphs,
-        FontFeatures = NativeFeatures.Create(font.Features), FontAxes = NativeFeatures.Create(font.Axes),
-        CursorShape = cursor
-    };
+        internal readonly TerminalFont Font = appearance.Font;
+        internal readonly string Face = appearance.FontFace;
+        internal readonly IDictionary<string, float> Features = NativeFeatures.Create(appearance.Font.Features);
+        internal readonly IDictionary<string, float> Axes = NativeFeatures.Create(appearance.Font.Axes);
+    }
+    NativeFont font = new(initial);
+    internal void SetFont(TerminalAppearance appearance) => font = new(appearance);
 
     static Color Native(Rgb c) => new(c.R, c.G, c.B, 255);
-    readonly Color[]? importedTable = scheme?.Ansi.Select(Native).ToArray();
+    readonly TerminalScheme? scheme = initial.Scheme;
+    readonly Color[]? importedTable = initial.Scheme?.Ansi.Select(Native).ToArray();
     // ==================== Color Tables (ICoreScheme) ====================
 
     /// <summary>
@@ -118,7 +120,7 @@ internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bo
 
     public uint CursorHeight { get; set; } = DefaultCursorHeight;
 
-    public CursorStyle CursorShape { get; init; }
+    public CursorStyle CursorShape { get; } = initial.Cursor;
 
     public bool IntenseIsBold { get; set; } = false;
 
@@ -192,9 +194,9 @@ internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bo
 
     public TextAntialiasingMode AntialiasingMode { get; set; } = TextAntialiasingMode.Grayscale;
 
-    public string CellHeight { get; set; } = string.Empty;
+    public string CellHeight => font.Font.CellHeight;
 
-    public string CellWidth { get; set; } = string.Empty;
+    public string CellWidth => font.Font.CellWidth;
 
     public string Commandline { get; set; } = string.Empty;
 
@@ -208,23 +210,23 @@ internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bo
 
     public string DragDropDelimiter { get; set; } = " ";
 
-    public bool EnableBuiltinGlyphs { get; set; } = true;
+    public bool EnableBuiltinGlyphs => font.Font.BuiltinGlyphs;
 
-    public bool EnableColorGlyphs { get; set; } = true;
+    public bool EnableColorGlyphs => font.Font.ColorGlyphs;
 
     public bool EnableUnfocusedAcrylic { get; set; } = false;
 
     public bool FocusFollowMouse { get; set; } = false;
 
-    public IDictionary<string, float> FontAxes { get; set; } = new Dictionary<string, float>();
+    public IDictionary<string, float> FontAxes => font.Axes;
 
-    public required string FontFace { get; init; }
+    public string FontFace => font.Face;
 
-    public required IDictionary<string, float> FontFeatures { get; init; }
+    public IDictionary<string, float> FontFeatures => font.Features;
 
-    public float FontSize { get; set; } = 12.0f;
+    public float FontSize => font.Font.Size;
 
-    public FontWeight FontWeight { get; set; } = new FontWeight { Weight = 400 };
+    public FontWeight FontWeight => new() { Weight = font.Font.Weight };
 
     public GraphicsAPI GraphicsAPI { get; set; } = GraphicsAPI.Automatic;
 

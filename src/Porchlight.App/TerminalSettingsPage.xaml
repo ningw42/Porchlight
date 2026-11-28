@@ -72,7 +72,7 @@
       </controls:SettingsCard>
       <controls:SettingsCard Header="Blink">
         <ToggleSwitch x:Name="CursorBlinkSwitch" AutomationProperties.Name="Cursor blink" IsOn="True"
-                      Toggled="CursorChanged" MinWidth="0" OnContent="" OffContent="" />
+                      Toggled="BlinkToggled" MinWidth="0" OnContent="" OffContent="" />
       </controls:SettingsCard>
     </StackPanel>
   </ScrollViewer>

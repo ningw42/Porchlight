@@ -82,6 +82,36 @@ function TerminalRowHeight($text, $word) {
         if ($rects.Count -eq 1) { $rects[0].Height }
     }
 }
+function NativeFace($text) {
+    $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
+}
+function TokensAre($picker, [string[]]$expected, [switch]$ordered) {
+    if (!$picker -or $picker.GetCurrentPattern([ValuePattern]::Pattern).Current.Value) { return $false }
+    # Count committed token containers, not TextBlocks in a suggestion popup.
+    $listItem = [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem)
+    $names = foreach ($item in $picker.FindAll('Children', $listItem)) {
+        if (FindId PART_RemoveButton $item) { $item.Current.Name }
+    }
+    if (!$ordered) { $names = $names | Sort-Object; $expected = $expected | Sort-Object }
+    ($names -join ',') -ceq ($expected -join ',')
+}
+function CursorProbe($address, $query, $expected, $description) {
+    $done = [Threading.Tasks.TaskCompletionSource[bool]]::new()
+    $state.cursorProbe = @{ address=$address; query=$query; expected=$expected; done=$done }
+    $state.catalogEdit.SetResult('cursor-probe')
+    [void](WaitFor "$address $description" { $done.Task.IsCompletedSuccessfully })
+}
+function CheckLiveCursor($address, [ValidateSet('Blinking','Steady')]$blink, [ValidateSet('Bar','Underscore')]$shape, [switch]$programBlinks) {
+    $mode = if ($blink -eq 'Blinking') { 1 } else { 2 }
+    $style = @{ Bar=5; Underscore=3 }[$shape] + ($mode - 1)
+    # Query the program's actual DEC blink mode (1=set, 2=reset) and DECSCUSR style.
+    $query = "`e[?12`$p`eP`$q q`e\"
+    if ($programBlinks) { $query = "`e[?12h" + $query }
+    CursorProbe $address $query "`e[?12;$mode`$y`eP1`$r$style q`e\" "to report a $blink $shape cursor"
+}
+function CheckProgramColor($address) {
+    CursorProbe $address "`e]4;1;?`a" "`e]4;1;rgb:1212/3434/5656`e\" 'to retain the program-defined ANSI red'
+}
 function CheckPreviewPointer($settings, $text) {
     $pane = $text.DocumentRange.GetEnclosingElement()
     if ($pane.Current.ClassName -cne 'TermControl' -or $pane.Current.IsEnabled) { throw 'Expected a disabled native preview' }
@@ -224,28 +254,53 @@ function CheckCursorSettings($settings) {
     }
     $sample = FindId TerminalPreviewSample $settings
     $selected = [SelectionItemPattern]::Pattern
-    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Blinking Vintage cursor') { throw 'Expected the live Vintage cursor in the preview' }
+    if (!$options[1].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Bar cursor') { throw 'Lost the pre-connect Bar cursor' }
     $toggle = FindId CursorBlinkSwitch $settings
     $blink = $toggle.GetCurrentPattern([TogglePattern]::Pattern)
-    if ($toggle.Current.Name -cne 'Cursor blink' -or $blink.Current.ToggleState -ne 'On') { throw 'Expected a blinking cursor by default' }
+    if ($toggle.Current.Name -cne 'Cursor blink' -or $blink.Current.ToggleState -ne 'Off') { throw 'Lost the pre-connect blink preference' }
+    CheckLiveCursor t75 Steady Bar
+    # Home, then park the program's parser inside CUP. Wait for credit, not a sleep or the pipe write.
+    CursorProbe t75 "`e[H`e[4;" '' 'to consume the unfinished cursor-position command'
     $blink.Toggle()
-    [void](WaitFor 'steady Vintage cursor' { $sample.Current.HelpText -ceq 'Vintage cursor' })
-    foreach ($item in $options[1..4]) {
+    [void](WaitFor 'blinking Bar without changing shape' { $sample.Current.HelpText -ceq 'Blinking Bar cursor' })
+    CursorProbe t75 "3H`e[6n" "`e[4;3R" 'to finish the split CUP at row 4, column 3'
+    CheckLiveCursor t75 Blinking Bar # Only now query the deferred blink edit; the suffix frame has finished.
+    # REP uses the last printed graphic. A complete CSI inserted after '@' would clear that register.
+    CursorProbe t75 "`e[4;3H@" '' 'to print a repeatable graphic'
+    $blink.Toggle()
+    [void](WaitFor 'steady Bar requested after printable text' { $sample.Current.HelpText -ceq 'Bar cursor' })
+    CursorProbe t75 "`e[3b`e[6n" "`e[4;7R" 'to repeat all three graphics before the deferred blink change'
+    CheckLiveCursor t75 Steady Bar
+    $blink.Toggle()
+    [void](WaitFor 'blinking Bar restored' { $sample.Current.HelpText -ceq 'Blinking Bar cursor' })
+    # The older user Off must not land after a newer DECSET, even if the command spans DATA frames.
+    CursorProbe t75 'repeatable!' '' 'to retain a repeatable graphic'
+    $blink.Toggle()
+    [void](WaitFor 'Off requested at a printable prompt' { $sample.Current.HelpText -ceq 'Bar cursor' })
+    CursorProbe t75 "`e[?12" '' 'to consume the prefix of DECSET 12'
+    CursorProbe t75 'h' '' 'to complete the newer program blink request'
+    CheckLiveCursor t75 Blinking Bar
+    $blink.Toggle()
+    [void](WaitFor 'blinking choice restored' { $sample.Current.HelpText -ceq 'Blinking Bar cursor' })
+    foreach ($item in $options[0,2,3,4]) {
         $item.GetCurrentPattern($selected).Select()
         [void](WaitFor "preview $($item.Current.Name) cursor" {
-            $item.GetCurrentPattern($selected).Current.IsSelected -and $sample.Current.HelpText -ceq "$($item.Current.Name) cursor"
+            $item.GetCurrentPattern($selected).Current.IsSelected -and $sample.Current.HelpText -ceq "Blinking $($item.Current.Name) cursor"
         })
     }
     $blink.Toggle()
-    [void](WaitFor 'blinking cursor without changing shape' { $sample.Current.HelpText -ceq 'Blinking EmptyBox cursor' })
+    [void](WaitFor 'steady EmptyBox without changing shape' { $sample.Current.HelpText -ceq 'EmptyBox cursor' })
+    $options[2].GetCurrentPattern($selected).Select()
+    [void](WaitFor 'steady Underscore cursor' { $sample.Current.HelpText -ceq 'Underscore cursor' })
+    CheckLiveCursor t75 Steady Underscore
 }
-function CheckFontPicker($settings, $text) {
+function CheckFontPicker($settings, $text, $live) {
     $picker = WaitFor 'terminal font picker' {
         $p = FindId TerminalFontPicker $settings
         if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
     }
     $reset = WaitFor 'reset fonts button' { FindId ResetFontsButton $settings }
-    $launchFont = $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
+    $launchFont = NativeFace $live
     if ($launchFont -isnot [string] -or !$launchFont -or $launchFont -ceq 'Consolas') { throw "Unexpected native launch font: '$launchFont'" }
     $value = $picker.GetCurrentPattern([ValuePattern]::Pattern)
     if ($value.Current.Value -or $reset.Current.IsEnabled) { throw 'Expected an empty picker inheriting the launch fonts' }
@@ -253,18 +308,18 @@ function CheckFontPicker($settings, $text) {
     # The comma commits the name through the picker's own delimiter handling. No keyboard focus or injected keys.
     $value.SetValue('consolas,')
     $token = [PropertyCondition]::new([AutomationElement]::NameProperty, 'Consolas')
-    [void](WaitFor 'Consolas token and preview' {
+    [void](WaitFor 'Consolas token, preview and original live pane' {
         $reset.Current.IsEnabled -and $picker.FindFirst('Descendants', $token) -and
-            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq 'Consolas'
+            (NativeFace $text) -ceq 'Consolas' -and (NativeFace $live) -ceq 'Consolas'
     })
     $reset.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
     [void](WaitFor 'reset to inherited fonts' {
         !$reset.Current.IsEnabled -and !$value.Current.Value -and !$picker.FindFirst('Descendants', $token) -and
-            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq $launchFont
+            (NativeFace $text) -ceq $launchFont -and (NativeFace $live) -ceq $launchFont
     })
 }
 
-function CheckFontSize($settings, $text) {
+function CheckFontSize($settings, $text, $live) {
     $size = WaitFor 'font size editor' { FindId TerminalFontSize $settings }
     $range = $size.GetCurrentPattern([RangeValuePattern]::Pattern)
     $up = FindId UpSpinButton $size
@@ -282,11 +337,12 @@ function CheckFontSize($settings, $text) {
     CommitSizeText (12.5).ToString([cultureinfo]::CurrentCulture)
     $fractionalHeight = WaitFor "12.5 pt in editor and native cells shorter than $launchHeight px" {
         $h = TerminalRowHeight $text 'git'
-        if ($range.Current.Value -eq 12.5 -and $h -gt 0 -and $h -lt $launchHeight) { $h }
+        if ($range.Current.Value -eq 12.5 -and $h -gt 0 -and $h -lt $launchHeight -and (TerminalRowHeight $live 'Fixture') -eq $h) { $h }
     }
     $up.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
     [void](WaitFor "one-point spin step to 13.5 pt and native cells taller than $fractionalHeight px" {
-        $range.Current.Value -eq 13.5 -and (TerminalRowHeight $text 'git') -gt $fractionalHeight
+        $h = TerminalRowHeight $text 'git'
+        $range.Current.Value -eq 13.5 -and $h -gt $fractionalHeight -and (TerminalRowHeight $live 'Fixture') -eq $h
     })
     CommitSizeText ''
     [void](WaitFor 'clearing restores the last valid size in the editor' { $range.Current.Value -eq 13.5 -and $inputValue.Current.Value })
@@ -304,14 +360,7 @@ function CheckOpenTypePicker($settings) {
     $listItem = [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem)
     $fixturePid = [PropertyCondition]::new([AutomationElement]::ProcessIdProperty, $viewer.Id)
 
-    function ChipsAre([string[]]$expected) {
-        # Count token containers, not matching TextBlocks (the popup can contain the same tag).
-        if ($value.Current.Value) { return $false } # Also wait for the delimiter to be consumed.
-        $names = foreach ($item in $picker.FindAll('Children', $listItem)) {
-            if (FindId PART_RemoveButton $item) { $item.Current.Name }
-        }
-        (($names | Sort-Object) -join ',') -ceq (($expected | Sort-Object) -join ',')
-    }
+    function ChipsAre([string[]]$expected) { TokensAre $picker $expected }
     function RemoveChip($tag) {
         $name = [PropertyCondition]::new([AutomationElement]::NameProperty, $tag)
         $chip = $picker.FindFirst('Children', [AndCondition]::new($listItem, $name))
@@ -328,7 +377,9 @@ function CheckOpenTypePicker($settings) {
         if ($row -and !$row.Current.IsOffscreen) { $row }
     }
 
-    [void](WaitFor 'launch ligatures on, no individual chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
+    [void](WaitFor 'launch ss01 override and ligatures on' { (ChipsAre ss01) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
+    RemoveChip ss01
+    [void](WaitFor 'removed launch chip can be reset' { (ChipsAre @()) -and $reset.Current.IsEnabled })
     $switch.Toggle()
     [void](WaitFor 'disabling ligatures is independent of feature chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'Off' -and $reset.Current.IsEnabled })
     if ($CheckFocus) {
@@ -397,16 +448,38 @@ function CheckOpenTypePicker($settings) {
     [void](WaitFor 'launch font offers zero again' { Suggestion zero })
     $value.SetValue('')
     [void](WaitFor 'edited chips survive restoring the launch font' { (ChipsAre ss01) -and $reset.Current.IsEnabled })
-    $reset.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
-    [void](WaitFor 'reset restores launch switch and individual tags' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
-
+    # Close with both feature controls different from the explicit launch map. Reset them only after a reopen.
+    RemoveChip ss01
+    [void](WaitFor 'launch chip removed' { ChipsAre @() })
+    $value.SetValue('zero,')
+    [void](WaitFor 'edited features ready to retain' { (ChipsAre zero) -and $switch.Current.ToggleState -eq 'Off' -and $reset.Current.IsEnabled })
 }
 
-Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Code, Consolas') -BeforeConnect {
+function CheckRetainedSettings($settings, $text, $pt, $height, $face) {
+    [void](WaitFor "reopened Settings: ordered families, $pt pt, features, ligatures and steady Underscore" {
+        $options = @(CursorOptions $settings)
+        $options.Count -eq 5 -and $options[2].GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
+            (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'Off' -and
+            (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Underscore cursor' -and
+            (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -eq $pt -and
+            (TokensAre (FindId TerminalFontPicker $settings) 'Consolas','Cascadia Code' -ordered) -and
+            (TokensAre (FindId FeaturePicker $settings) zero) -and
+            (FindId CodingLigaturesSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'Off' -and
+            (FindId ResetFontsButton $settings).Current.IsEnabled -and (FindId ResetFeaturesButton $settings).Current.IsEnabled -and
+            (NativeFace $text) -ceq $face -and (TerminalRowHeight $text 'git') -eq $height
+    })
+}
+
+Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Code, Consolas', '--ss01=1') -BeforeConnect {
     CheckNoGatewayControls $root
     $settings = OpenSettings # The fake peer has not even read the gateway hello.
     [void](WaitForTerminalText TerminalPreviewSample $settings $previewLines)
-    # Leave both cursor controls non-default; CheckCursorSettings verifies the reset after reopening.
+    [void](WaitFor 'initial blinking Vintage cursor' {
+        (CursorOptions $settings)[0].GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected -and
+            (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'On' -and
+            (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Blinking Vintage cursor'
+    })
+    # Edit with no pane or gateway session: the next attachment must use these choices.
     (CursorOptions $settings)[1].GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
     (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Toggle()
     [void](WaitFor 'steady Bar cursor before close' { (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Bar cursor' })
@@ -415,7 +488,10 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckNoGatewayControls $root
     SelectSpace core-local Personal $personal t75
     $live = WaitForTerminalText PaneHost $root 'Fixture t75'
+    $originalPane = $live.DocumentRange.GetEnclosingElement()
+    $launchFace = NativeFace $live
     $liveHeight = WaitFor 'initial live terminal cell height' { TerminalRowHeight $live 'Fixture' }
+    CheckLiveCursor t75 Steady Bar # Edited before any connection existed.
     $settings = OpenSettings
     $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
     CheckPreviewPointer $settings $text
@@ -432,10 +508,36 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckScope core-local Personal $personal t75
     CheckSettingsLayout $settings
     CheckPreviewViewport $settings $text $liveHeight
-    CheckFontPicker $settings $text
-    CheckFontSize $settings $text
+    CheckFontPicker $settings $text $live
+    CheckFontSize $settings $text $live
     CheckOpenTypePicker $settings
     CheckCursorSettings $settings
+    # The program overrides the configured steady underline AND an ANSI palette slot.
+    CursorProbe t75 "`e[5 q`e]4;1;rgb:12/34/56`a" '' 'to choose a blinking bar and a custom palette entry'
+    CheckLiveCursor t75 Blinking Bar
+    CheckProgramColor t75
+    $ligatures = (FindId CodingLigaturesSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern)
+    foreach ($expected in 'On','Off') {
+        $ligatures.Toggle()
+        [void](WaitFor "ligatures $expected" { $ligatures.Current.ToggleState -eq $expected })
+        CheckLiveCursor t75 Blinking Bar
+        CheckProgramColor t75
+    }
+    $fonts = FindId TerminalFontPicker $settings
+    $family = $fonts.GetCurrentPattern([ValuePattern]::Pattern)
+    $family.SetValue('Consolas,')
+    [void](WaitFor 'edited primary family on the original pane' { (TokensAre $fonts Consolas) -and (NativeFace $live) -ceq 'Consolas' })
+    $family.SetValue('Cascadia Code,')
+    $face = WaitFor 'ordered fallback committed; both native terminals use the edited face' {
+        $name = NativeFace $live
+        if ((TokensAre $fonts 'Consolas','Cascadia Code' -ordered) -and $name -and $name -cne $launchFace -and $name -ceq (NativeFace $text)) { $name }
+    }
+    $pt = 13.5
+    $height = WaitFor 'edited native height on both terminals' {
+        $h = TerminalRowHeight $live 'Fixture'; if ($h -gt 0 -and $h -eq (TerminalRowHeight $text 'git')) { $h }
+    }
+    CheckLiveCursor t75 Blinking Bar
+    CheckProgramColor t75
     if ($CheckFocus) {
         [void](WaitFor 'main window active with Settings open' {
             [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
@@ -444,19 +546,50 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     $again = OpenSettings
     if ($again.Current.NativeWindowHandle -ne $settings.Current.NativeWindowHandle) { throw 'Settings opened a different window' }
     CloseSettings $settings
-    $launchFace = $live.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
     foreach ($cycle in 1..6) {
         $settings = OpenSettings
         $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
-        if ((FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -ne 14 -or
-            (TerminalRowHeight $text 'git') -ne $liveHeight -or
-            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -cne $launchFace) { throw "Preview did not reset on reopen $cycle" }
-        (FindId TerminalFontPicker $settings).GetCurrentPattern([ValuePattern]::Pattern).SetValue('Consolas,')
-        [void](WaitFor "native font edit before close $cycle" { $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq 'Consolas' })
+        CheckRetainedSettings $settings $text $pt $height $face
+        if ($cycle -eq 1) { CheckLiveCursor t75 Blinking Bar; CheckProgramColor t75 } # Opening Settings is not an edit.
+        $pt = if ($pt -eq 13.5) { 24 } else { 13.5 }
+        (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).SetValue($pt)
+        $height = WaitFor "fresh $pt pt edit in both native buffers before close $cycle" {
+            $h = TerminalRowHeight $live 'Fixture'
+            if ($h -gt 0 -and $h -ne $height -and $h -eq (TerminalRowHeight $text 'git')) { $h }
+        }
         CloseSettings $settings
     }
     $state.catalogEdit.SetResult('retitle') # Require fresh traffic on the original peer after the repeated teardowns.
     $personal.t75 = 't75 · π - Porchlight'
     CheckScope core-local Personal $personal t75
-    if (!$live.DocumentRange.GetText(-1).Contains('Fixture t75') -or (TerminalRowHeight $live 'Fixture') -ne $liveHeight) { throw 'Settings changed the live terminal' }
+    $mounted = WaitForTerminalText PaneHost $root 'Fixture t75'
+    if (!$originalPane.Equals($mounted.DocumentRange.GetEnclosingElement()) -or $mounted.DocumentRange.GetText(-1).Contains($previewLines[0])) {
+        throw 'Settings replaced the active terminal or replayed the specimen into its buffer'
+    }
+    CheckLiveCursor t75 Blinking Bar # No CLOSE/attach was authorized throughout these edits.
+    CheckProgramColor t75
+
+    SelectSpace core-local Unassigned $unassigned t77
+    $next = WaitForTerminalText PaneHost $root 'Fixture t77'
+    [void](WaitFor 'later mount uses the edited font face and cell height' { (NativeFace $next) -ceq $face -and (TerminalRowHeight $next 'Fixture') -eq $height })
+    CheckLiveCursor t77 Steady Underscore # A fresh pane gets the saved steady underline, not t75's override.
+    $settings = OpenSettings
+    $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
+    CheckRetainedSettings $settings $text $pt $height $face
+    CheckLiveCursor t77 Blinking Underscore -programBlinks
+    (FindId ResetFontsButton $settings).GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'reset to original launch family list, without resetting feature edits' {
+        !(FindId ResetFontsButton $settings).Current.IsEnabled -and (TokensAre (FindId TerminalFontPicker $settings) @()) -and
+            (NativeFace $text) -ceq $launchFace -and (NativeFace $next) -ceq $launchFace -and
+            (TokensAre (FindId FeaturePicker $settings) zero) -and (FindId ResetFeaturesButton $settings).Current.IsEnabled
+    })
+    (FindId ResetFeaturesButton $settings).GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'reset to original launch ss01 and ligatures, without resetting size or cursor' {
+        (TokensAre (FindId FeaturePicker $settings) ss01) -and !(FindId ResetFeaturesButton $settings).Current.IsEnabled -and
+            (FindId CodingLigaturesSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Current.ToggleState -eq 'On' -and
+            (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -eq $pt -and
+            (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Underscore cursor'
+    })
+    CheckLiveCursor t77 Blinking Underscore # Neither resetting fonts nor restoring launch feature overrides resets the program's mode.
+    CloseSettings $settings
 }

@@ -8,12 +8,13 @@ namespace Porchlight.App;
 
 public sealed partial class SettingsWindow : Window
 {
-    internal sealed record PreviewContext(TerminalFont Font, TerminalScheme? Scheme, ulong Hwnd);
-    readonly PreviewContext preview;
+    internal sealed record EditorContext(TerminalFont LaunchFont, TerminalAppearance Initial,
+        ITerminalAppearanceTarget Live, ulong Hwnd);
+    readonly EditorContext editor;
 
-    internal SettingsWindow(Window owner, TerminalFont launchFont, TerminalScheme? scheme)
+    internal SettingsWindow(MainWindow owner, TerminalFont launchFont, TerminalAppearance appearance)
     {
-        preview = new(launchFont, scheme, (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this));
+        editor = new(launchFont, appearance, owner, (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this));
         InitializeComponent();
         // Give the window a focus target before the page chooses its first editor.
         CategoryPage.Loaded += (_, _) => TerminalCategory.Focus(FocusState.Programmatic);
@@ -34,6 +35,6 @@ public sealed partial class SettingsWindow : Window
     void CategorySelected(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItemContainer == TerminalCategory)
-            CategoryPage.Navigate(typeof(TerminalSettingsPage), preview);
+            CategoryPage.Navigate(typeof(TerminalSettingsPage), editor);
     }
 }

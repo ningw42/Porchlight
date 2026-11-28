@@ -6,7 +6,7 @@ using Windows.Graphics;
 
 namespace Porchlight.App;
 
-public sealed partial class MainWindow : Window
+public sealed partial class MainWindow : Window, ITerminalAppearanceTarget
 {
     sealed record Target(string MachineId, string Address);
     readonly CancellationTokenSource lifetime = new();
@@ -49,6 +49,7 @@ public sealed partial class MainWindow : Window
         try
         {
             options = LaunchOptions.Parse(args);
+            appearance = new(options.Font, options.Scheme);
             if (options.Scheme is { } scheme)
             {
                 Title = $"Porchlight · {scheme.Name}";
@@ -280,7 +281,7 @@ public sealed partial class MainWindow : Window
         if (closing) return;
         if (settingsWindow == null)
         {
-            settingsWindow = new SettingsWindow(this, options.Font, options.Scheme);
+            settingsWindow = new SettingsWindow(this, options.Font, appearance);
             settingsWindow.Closed += (_, _) => settingsWindow = null;
         }
         settingsWindow.Activate();

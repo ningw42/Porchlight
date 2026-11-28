@@ -2,9 +2,9 @@ namespace Porchlight.Core.Configuration;
 
 /// Window-local overrides, independent of which family supplies the candidate list.
 /// Missing is the font/shaper default, distinct from an explicit zero.
-public sealed class FontFeatureOverrides(IReadOnlyDictionary<string, float> launch)
+public sealed class FontFeatureOverrides(IReadOnlyDictionary<string, float> launch, IReadOnlyDictionary<string, float>? current = null)
 {
-    readonly Dictionary<string, float> values = new(launch, StringComparer.Ordinal);
+    readonly Dictionary<string, float> values = new(current ?? launch, StringComparer.Ordinal);
 
     public IReadOnlyDictionary<string, float> Values => values;
     public bool CanReset => values.Count != launch.Count || launch.Any(entry =>

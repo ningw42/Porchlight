@@ -10,6 +10,8 @@ namespace Porchlight.App;
 
 public sealed partial class MainWindow
 {
+    TerminalAppearance appearance = new(new());
+    (TerminalAppearance Appearance, TerminalSettings Settings)? mountedAppearance;
     Target? requested;
     PaneConnection? connection;
     TermControl? pane;
@@ -17,12 +19,33 @@ public sealed partial class MainWindow
     long revision;
     Task changingViewer = Task.CompletedTask;
 
+    void ITerminalAppearanceTarget.ApplyAppearance(TerminalAppearance next)
+    {
+        if (closing) return;
+        appearance = next; // New panes start with the latest edits, including edits made during a handoff.
+        if (mountedAppearance is not { } mounted || mounted.Appearance == next || pane is not { } control || connection is not { } bridge) return;
+        const string failure = "Could not apply the appearance to this terminal.";
+        try
+        {
+            var settings = next.UpdateControl(control, mounted.Settings, mounted.Appearance);
+            if (next.Blink != mounted.Appearance.Blink && next.Blink is bool blink) bridge.SetCursorBlink(blink);
+            mountedAppearance = (next, settings);
+            if (Status.Text == failure) ShowStatus();
+        }
+        catch (Exception ex) when (TerminalAppearance.IsNativeFailure(ex))
+        {
+            // Leave the attachment alive. The next edit retries from the last successful appearance.
+            ShowStatus(failure);
+        }
+    }
+
     // UI-thread handoff. Revoke the old control immediately, but keep its renderer alive
     // until its stream is finished. Only the most recent committed choice may open a pane.
     void RequestViewer(Target? target)
     {
         if (requested == target) return;
         requested = target;
+        mountedAppearance = null; // Stop applying edits to the outgoing control immediately.
         long version = ++revision;
         if (connection != null) _ = connection.CloseAsync();
         AutomationProperties.SetName(PaneHost, "");
@@ -59,9 +82,12 @@ public sealed partial class MainWindow
 
     void MountPane(CoreSession gateway, Target target, string label, long version, object? selectionFocus)
     {
-        var settings = TerminalSettings.Create(options.Font, options.Scheme);
-        var bridge = connection = new PaneConnection(gateway, target.MachineId, target.Address);
-        var control = pane = new TermControl(settings, settings, bridge) { OwningHwnd = (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this) };
+        // TermControl requires native settings at construction. Give the same snapshot to the
+        // connection before Start, so its initial blink precedes the program's first DATA.
+        var initial = appearance;
+        var settings = initial.CreateSettings();
+        var bridge = connection = new PaneConnection(gateway, target.MachineId, target.Address, initial);
+        var control = pane = new TermControl(settings, null, bridge) { OwningHwnd = (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this) };
         bool Current() => version == revision && connection == bridge && !closing;
         control.KeyBindings(new AppKeyBindings(control));
         control.GotFocus += (_, _) => { if (Current()) { insidePane = true; SendFocus(); } };
@@ -82,6 +108,7 @@ public sealed partial class MainWindow
             } catch { if (Current()) ShowStatus("Clipboard unavailable."); }
         };
         PaneHost.Child = control;
+        mountedAppearance = (initial, settings);
         _ = WatchPane();
 
         async Task WatchPane()
@@ -114,7 +141,7 @@ public sealed partial class MainWindow
     async Task RemovePane()
     {
         var bridge = connection; var control = pane;
-        connection = null; pane = null; insidePane = false;
+        mountedAppearance = null; connection = null; pane = null; insidePane = false;
         if (bridge != null) await bridge.CloseAsync();
         // Release any size held on the outgoing surface; mount the next viewer at its settled grid.
         if (sidebarAnimation != null) UpdateSidebar(animate: false);

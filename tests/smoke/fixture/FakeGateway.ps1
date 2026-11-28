@@ -61,6 +61,12 @@ $header = [byte[]]::new(9); $active = 0; $holdingClose = $null; $subscribed = $f
         $edit = $state.catalogEdit.Task.Result
         $state.catalogEdit = [Threading.Tasks.TaskCompletionSource[string]]::new()
         switch ($edit) {
+            'cursor-probe' {
+                if (!$active -or $probe -or $state.cursorProbe.address -cne $state.activeAddress) { throw 'No matching attachment for cursor probe' }
+                $probe = $state.cursorProbe; $remainingReply = $probe.expected
+                $bytes = $utf8.GetBytes($probe.query); $probeCredit = $bytes.Length
+                WriteFrame $active 0 $bytes
+            }
             'retitle' {
                 $targets.t75.title = 'π - Porchlight'
                 WriteEvent @{ type='title'; terminal='t75'; data=@{title=$targets.t75.title} }
@@ -96,7 +102,18 @@ $header = [byte[]]::new(9); $active = 0; $holdingClose = $null; $subscribed = $f
         if ($channel -eq $eventChannel -and $subscribed -and $kind -eq 1 -and $n -eq 4) { continue } # event credit
         if ($channel -ne $active) { throw "Unexpected stream channel $channel (active: $active, kind: $kind)" }
         switch ($kind) {
-            1 { if ($n -ne 4) { throw 'Invalid terminal credit' } }
+            0 {
+                # No automatic-input capability advertised. Only the exact pending reply is legal DATA.
+                $part = $utf8.GetString($body)
+                if (!$n -or !$remainingReply -or !$remainingReply.StartsWith($part, [StringComparison]::Ordinal)) {
+                    throw "Unexpected terminal DATA on channel $active (hex: $([Convert]::ToHexString($body)))"
+                }
+                $remainingReply = $remainingReply.Substring($part.Length)
+            }
+            1 {
+                if ($n -ne 4) { throw 'Invalid terminal credit' }
+                if ($probe -and [BitConverter]::ToUInt32($body, 0) -eq $probeCredit) { $probeCredit = 0 }
+            }
             2 {
                 if ($n -or $holdingClose) { throw "Expected one empty CLOSE on channel $active" }
                 if ($state.closing -or $state.expectDetach) {
@@ -120,6 +137,8 @@ $header = [byte[]]::new(9); $active = 0; $holdingClose = $null; $subscribed = $f
             4 { if ($n -ne 1 -or $body[0] -gt 1) { throw 'Invalid terminal focus' } }
             default { throw "Unexpected frame kind $kind on channel $channel" }
         }
+        # Credit follows synchronous render, even for an unfinished CSI with no reply of its own.
+        if ($probe -and !$probeCredit -and !$remainingReply) { $probe.done.SetResult($true); $probe = $null }
         continue
     }
     if ($kind -ne 0) { throw "Unexpected RPC frame kind $kind" }

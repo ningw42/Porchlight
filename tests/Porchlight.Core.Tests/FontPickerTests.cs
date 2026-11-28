@@ -41,6 +41,22 @@ public class FontPickerTests
     }
 
     [TestMethod]
+    public void ReopenedEditorRestoresEditsButStillResetsToLaunchFeatures()
+    {
+        var launch = new Dictionary<string, float> { ["cv11"] = 3, ["calt"] = 1 };
+        var current = new Dictionary<string, float> { ["cv11"] = 0, ["zero"] = 1, ["calt"] = 1 };
+        var editor = new FontFeatureOverrides(launch, current);
+        Assert.IsTrue(editor.CanReset);
+        CollectionAssert.AreEqual(new[] { "zero" }, editor.EnabledIndividualTags.ToArray());
+        editor.SetEnabled("cv11", true);
+        Assert.AreEqual(3f, editor.Values["cv11"]);
+        editor.Reset();
+        Assert.IsFalse(editor.CanReset);
+        Assert.IsFalse(editor.Values.ContainsKey("zero"));
+        Assert.AreEqual(0f, current["cv11"]);
+    }
+
+    [TestMethod]
     public void ReadingTheBinarySwitchDoesNotRewriteDefaultOrMixedLaunchMaps()
     {
         var launch = new Dictionary<string, float>();

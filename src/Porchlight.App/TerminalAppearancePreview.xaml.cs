@@ -1,14 +1,12 @@
-using Microsoft.Terminal.Core;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Porchlight.Core.Configuration;
-using System.Runtime.InteropServices;
 using Windows.Foundation;
 
 namespace Porchlight.App;
 
-public sealed partial class TerminalAppearancePreview : UserControl
+public sealed partial class TerminalAppearancePreview : UserControl, ITerminalAppearanceTarget
 {
+    internal ulong OwningHwnd { private get; set; }
     PreviewConnection? output;
     internal event Action<Size>? CellMeasured;
 
@@ -26,20 +24,21 @@ public sealed partial class TerminalAppearancePreview : UserControl
         PreviewHost.Close(TerminalPreviewSample);
     }
 
-    internal void Update(ulong hwnd, TerminalScheme? scheme, TerminalFont font, CursorStyle cursor, bool blink)
+    void ITerminalAppearanceTarget.ApplyAppearance(TerminalAppearance appearance)
     {
-        ToolTipService.SetToolTip(TerminalPreviewSample, font.Face);
-        AutomationProperties.SetHelpText(TerminalPreviewSample, blink ? $"Blinking {cursor} cursor" : $"{cursor} cursor");
+        ToolTipService.SetToolTip(TerminalPreviewSample, appearance.FontFace);
+        AutomationProperties.SetHelpText(TerminalPreviewSample, appearance.BlinkEnabled
+            ? $"Blinking {appearance.Cursor} cursor" : $"{appearance.Cursor} cursor");
         try
         {
-            var settings = TerminalSettings.Create(font, scheme, cursor);
+            var settings = appearance.CreateSettings();
             var connection = output ?? new PreviewConnection(DispatcherQueue, FitSample);
-            connection.CursorBlink = blink;
-            PreviewHost.Show(TerminalPreviewSample, hwnd, settings, connection);
+            connection.CursorBlink = appearance.BlinkEnabled;
+            PreviewHost.Show(TerminalPreviewSample, OwningHwnd, settings, connection);
             output = connection;
             connection.Refresh();
         }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException or COMException)
+        catch (Exception ex) when (TerminalAppearance.IsNativeFailure(ex))
         {
             Close();
             TerminalPreviewSample.Child = new TextBlock { Text = "Terminal preview unavailable.", Margin = new(12) };
