@@ -33,6 +33,11 @@
           </Button>
         </Grid>
       </controls:SettingsCard>
+      <controls:SettingsCard Header="Font size">
+        <NumberBox x:Name="TerminalFontSize" Width="144" AutomationProperties.Name="Font size in points"
+                   SpinButtonPlacementMode="Inline" SmallChange="1" Minimum="0" Maximum="128"
+                   ValueChanged="FontSizeChanged" />
+      </controls:SettingsCard>
       <controls:SettingsCard Header="Ligatures">
         <ToggleSwitch x:Name="CodingLigaturesSwitch" AutomationProperties.Name="Ligatures"
                       Toggled="LigaturesToggled" MinWidth="0" OnContent="" OffContent="" />

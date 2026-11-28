@@ -49,6 +49,8 @@ Use `--machine=yuki` to start on that configured remote instead of Local. To ope
 
 **Preview terminal fonts:** Open the sidebar gear and select **Terminal**. Under **Font families**, type an installed family name and select a suggestion or press Enter. Add families in fallback order; removing all tokens or choosing **Reset fonts** restores the launch list.
 
+**Font size** previews sizes up to 128 points. Use the arrows to step by 1 point, or type a fractional size such as `12.5` and press Enter.
+
 **Ligatures** switches the optional `calt`, `liga`, `clig`, `dlig`, and `hlig` features together in the terminal preview. `calt` can affect letters as well as operators. Required ligatures (`rlig`) are left alone. With mixed launch settings, the switch reads on if any grouped feature is enabled; it leaves the original values intact until you change it.
 
 Focus **OpenType features** to browse the first installed family’s remaining tags, or type a prefix such as `ss`. Tags with a verified off/on preview appear first, followed by tags without one; each group is alphabetical, even when searching. The preview shows the shortest part of a sample that still changes: a single character when possible, a pair for kerning, or a cluster when needed. A dash means no example was found, not that the feature is unsupported. Adding a chip enables that tag; removing it explicitly disables it. **Reset ligatures and OpenType features** restores the launch overrides. Closing Settings discards the preview changes without modifying the live terminal or saving settings.

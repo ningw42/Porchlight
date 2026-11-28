@@ -41,6 +41,7 @@ public sealed partial class TerminalSettingsPage : Page
     {
         var font = (TerminalFont)e.Parameter;
         launchFace = font.Face;
+        TerminalFontSize.Value = font.Size;
         features = new(font.Features);
         RestoreFeatureTokens();
         UpdateFamilies();
@@ -52,6 +53,18 @@ public sealed partial class TerminalSettingsPage : Page
         TerminalFontPicker.SuggestedItemsSource = installedFonts
             .Where(name => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && !families.Contains(name))
             .Take(12).ToArray();
+    }
+
+    void FontSizeChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        // A cleared NumberBox reports NaN. Keep the last usable size.
+        if (!double.IsFinite(args.NewValue) || args.NewValue <= 0)
+        {
+            sender.Value = args.OldValue;
+            return;
+        }
+        // Terminal sizes are points; XAML and Win2D measure text in DIPs.
+        AppearancePreview.FontSize = args.NewValue * (96d / 72d);
     }
 
     void FontQueryChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)

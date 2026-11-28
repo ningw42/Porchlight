@@ -129,6 +129,35 @@ function CheckFontPicker($settings) {
     })
 }
 
+function CheckFontSize($settings) {
+    $size = WaitFor 'font size editor' { FindId TerminalFontSize $settings }
+    $range = $size.GetCurrentPattern([RangeValuePattern]::Pattern)
+    $sample = (FindId TerminalPreviewSample $settings).GetCurrentPattern([TextPattern]::Pattern)
+    $up = FindId UpSpinButton $size
+    if (!$up -or $up.Current.IsOffscreen -or $range.Current.Value -ne 14) { throw 'Expected an inline font size editor showing the launch size' }
+    $launchSize = $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute)
+
+    $edit = FindId InputBox $size
+    $inputValue = $edit.GetCurrentPattern([ValuePattern]::Pattern)
+    function CommitSizeText([string]$text) {
+        $edit.SetFocus()
+        $inputValue.SetValue($text)
+        if ($CheckFocus) { SendSettingsKey $settings 0x0d 0x1c } # Enter
+        else { (FindId TerminalCategory $settings).SetFocus() }
+    }
+    CommitSizeText (12.5).ToString([cultureinfo]::CurrentCulture)
+    [void](WaitFor 'fractional size applied to the preview' {
+        $range.Current.Value -eq 12.5 -and $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute) -lt $launchSize
+    })
+    $fractionalSize = $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute)
+    $up.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
+    [void](WaitFor 'one-point spin step preserves the fraction' {
+        $range.Current.Value -eq 13.5 -and $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute) -gt $fractionalSize
+    })
+    CommitSizeText ''
+    [void](WaitFor 'clearing restores the last valid size in the editor' { $range.Current.Value -eq 13.5 -and $inputValue.Current.Value })
+}
+
 function CheckOpenTypePicker($settings) {
     $picker = WaitFor 'visible OpenType feature picker' {
         $p = FindId FeaturePicker $settings; if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
@@ -250,6 +279,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckScope core-local Personal $personal t75
     CheckSettingsLayout $settings
     CheckFontPicker $settings
+    CheckFontSize $settings
     CheckOpenTypePicker $settings
     if ($CheckFocus) {
         [void](WaitFor 'main window active with Settings open' {
