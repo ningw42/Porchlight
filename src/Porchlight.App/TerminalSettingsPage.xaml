@@ -64,6 +64,12 @@
           <TextBlock x:Name="FeatureStatus" Visibility="Collapsed" TextWrapping="Wrap" />
         </StackPanel>
       </controls:SettingsCard>
+
+      <TextBlock Text="Cursor" Margin="0,24,0,8" Style="{ThemeResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+      <controls:SettingsCard Header="Shape">
+        <local:AccessibleSegmented x:Name="CursorShapePicker" AutomationProperties.Name="Cursor shape"
+                                   SelectionMode="Single" SelectionChanged="CursorShapeChanged" />
+      </controls:SettingsCard>
     </StackPanel>
   </ScrollViewer>
 </Page>

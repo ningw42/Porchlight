@@ -1,5 +1,7 @@
 using Microsoft.Graphics.Canvas.Text;
+using Microsoft.Terminal.Core;
 using Microsoft.UI.Text;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Porchlight.Core.Configuration;
@@ -15,11 +17,14 @@ public sealed partial class TerminalAppearancePreview : UserControl
     readonly List<(int Start, int Length, string Family)> fallbacks = [];
     string? resolvedFace;
     string primary = "Consolas";
+    readonly CursorVisual cursor = new(CursorStyle.Bar);
+    internal event Action<CursorFont>? CursorFontChanged;
     Dictionary<string, float> features = [];
 
     public TerminalAppearancePreview()
     {
         InitializeComponent();
+        CursorLayer.Children.Add(cursor);
         drawing = new(DrawingHost, TerminalPreviewSample, Shape);
         RegisterPropertyChangedCallback(FontFamilyProperty, (_, _) => drawing.Invalidate());
     }
@@ -33,6 +38,12 @@ public sealed partial class TerminalAppearancePreview : UserControl
         drawing.Invalidate();
     }
 
+    public void SetCursorShape(CursorStyle shape)
+    {
+        cursor.Shape = shape;
+        AutomationProperties.SetHelpText(TerminalPreviewSample, $"{shape} cursor");
+    }
+
     void Shape(CanvasTextLayout layout)
     {
         var face = FontFamily.Source;
@@ -44,14 +55,23 @@ public sealed partial class TerminalAppearancePreview : UserControl
         var length = TerminalPreviewSample.Text.Length;
         layout.SetFontFamily(0, length, primary);
         foreach (var run in fallbacks) layout.SetFontFamily(run.Start, run.Length, run.Family);
-        if (features.Count == 0) return;
-        var typography = new CanvasTypography();
-        // The terminal seeds these standard shaping features when there are explicit overrides.
-        foreach (var tag in CodingLigatures.DefaultOnTags)
-            if (!features.ContainsKey(tag)) typography.AddFeature(OpenTypeDrawing.Tag(tag), 1);
-        foreach (var (tag, value) in features)
-            typography.AddFeature(OpenTypeDrawing.Tag(tag), uint.CreateSaturating(value));
-        layout.SetTypography(0, length, typography);
+        if (features.Count != 0)
+        {
+            var typography = new CanvasTypography();
+            // The terminal seeds these standard shaping features when there are explicit overrides.
+            foreach (var tag in CodingLigatures.DefaultOnTags)
+                if (!features.ContainsKey(tag)) typography.AddFeature(OpenTypeDrawing.Tag(tag), 1);
+            foreach (var (tag, value) in features)
+                typography.AddFeature(OpenTypeDrawing.Tag(tag), uint.CreateSaturating(value));
+            layout.SetTypography(0, length, typography);
+        }
+
+        // The last space reserves the cursor cell. Align the primary face's cell to the shaped line's baseline.
+        layout.GetCaretPosition(length - 1, false, out var region);
+        cursor.FontSize = layout.DefaultFontSize;
+        var scale = XamlRoot.RasterizationScale;
+        Canvas.SetLeft(cursor, Math.Round(region.LayoutBounds.X * scale) / scale);
+        Canvas.SetTop(cursor, Math.Round((region.LayoutBounds.Y + layout.LineMetrics[^1].Baseline) * scale) / scale - cursor.Baseline);
     }
 
     void ResolveFamilies(string face)
@@ -63,6 +83,11 @@ public sealed partial class TerminalAppearancePreview : UserControl
             name, FontWeights.Normal, FontStretch.Normal, FontStyle.Normal).Fonts.FirstOrDefault()))
             .Where(font => font.Face != null).ToArray();
         primary = fonts.FirstOrDefault().Name ?? "Consolas";
+        var primaryFace = fonts.FirstOrDefault().Face ?? system.GetMatchingFonts(
+            primary, FontWeights.Normal, FontStretch.Normal, FontStyle.Normal).Fonts.FirstOrDefault();
+        var cursorFont = CursorFont.FromFace(primaryFace);
+        cursor.UseFont(cursorFont);
+        CursorFontChanged?.Invoke(cursorFont);
         fallbacks.Clear();
         var text = TerminalPreviewSample.Text;
         var elements = StringInfo.GetTextElementEnumerator(text);

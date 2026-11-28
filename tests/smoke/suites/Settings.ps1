@@ -106,6 +106,30 @@ function CheckSettingsLayout($settings) {
     if ([Math]::Abs($paneWidths[0] - $paneWidths[1]) -gt 2 * $scale) { throw 'Settings navigation width changed on resize' }
     [PorchlightChrome]::Resize($settingsHwnd, $original.Width, $original.Height)
 }
+function CursorOptions($settings) {
+    $picker = FindId CursorShapePicker $settings
+    if ($picker) {
+        $picker.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::IsSelectionItemPatternAvailableProperty, $true))
+    }
+}
+function CheckCursorShapes($settings) {
+    $options = @(CursorOptions $settings)
+    if (($options.Current.Name -join ',') -cne 'Bar,Underscore,FilledBox,EmptyBox') { throw 'Unexpected cursor options or order' }
+    foreach ($item in $options) {
+        if ($item.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::IsTextPatternAvailableProperty, $true))) {
+            throw "$($item.Current.Name) uses a text glyph instead of cursor geometry"
+        }
+    }
+    $sample = FindId TerminalPreviewSample $settings
+    $selected = [SelectionItemPattern]::Pattern
+    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Bar cursor') { throw 'Expected Bar in the preview' }
+    foreach ($item in $options[1..3]) {
+        $item.GetCurrentPattern($selected).Select()
+        [void](WaitFor "preview $($item.Current.Name) cursor" {
+            $item.GetCurrentPattern($selected).Current.IsSelected -and $sample.Current.HelpText -ceq "$($item.Current.Name) cursor"
+        })
+    }
+}
 function CheckFontPicker($settings) {
     $picker = WaitFor 'terminal font picker' {
         $p = FindId TerminalFontPicker $settings
@@ -284,6 +308,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckFontPicker $settings
     CheckFontSize $settings
     CheckOpenTypePicker $settings
+    CheckCursorShapes $settings
     if ($CheckFocus) {
         [void](WaitFor 'main window active with Settings open' {
             [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)

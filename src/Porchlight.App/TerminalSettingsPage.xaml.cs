@@ -1,6 +1,7 @@
 using CommunityToolkit.WinUI;
 using CommunityToolkit.WinUI.Controls;
 using Microsoft.Graphics.Canvas.Text;
+using Microsoft.Terminal.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -30,6 +31,16 @@ public sealed partial class TerminalSettingsPage : Page
         InitializeComponent();
         installedFonts = CanvasTextFormat.GetSystemFontFamilies().Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var shape in new[] { CursorStyle.Bar, CursorStyle.Underscore, CursorStyle.FilledBox, CursorStyle.EmptyBox })
+        {
+            var icon = new CursorVisual(shape) { FontSize = 16 };
+            var item = new SegmentedItem { Content = icon };
+            AutomationProperties.SetName(item, shape.ToString());
+            ToolTipService.SetToolTip(item, shape.ToString());
+            CursorShapePicker.Items.Add(item);
+            AppearancePreview.CursorFontChanged += icon.UseFont;
+        }
+        CursorShapePicker.SelectedIndex = 0;
         TerminalFontPicker.ItemsSource = families;
         FeaturePicker.ItemsSource = selectedTags;
         families.CollectionChanged += (_, _) => UpdateFamilies();
@@ -45,6 +56,12 @@ public sealed partial class TerminalSettingsPage : Page
         features = new(font.Features);
         RestoreFeatureTokens();
         UpdateFamilies();
+    }
+
+    void CursorShapeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (CursorShapePicker.SelectedItem is SegmentedItem { Content: CursorVisual icon })
+            AppearancePreview.SetCursorShape(icon.Shape);
     }
 
     void Suggest(string query)
