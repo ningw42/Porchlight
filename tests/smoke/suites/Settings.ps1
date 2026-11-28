@@ -81,7 +81,7 @@ function CheckSettingsLayout($settings) {
                 !$category.GetCurrentPattern([SelectionItemPattern]::Pattern).Current.IsSelected) { return }
             $row = $category.Current.BoundingRectangle
             if ($row.IsEmpty -or $row.Width -lt 120 * $scale -or $row.Left -lt $window.Left -or $row.Left -gt $window.Left + 40 * $scale) { return }
-            foreach ($id in 'TerminalPageHeading','TerminalPreviewSample','FontSettingsCard','TerminalFontPicker','ResetFontsButton') {
+            foreach ($id in 'TerminalPageHeading','TerminalPreviewSample','TypographyHeading','FontSettingsCard','TerminalFontPicker','ResetFontsButton') {
                 $control = FindId $id $settings
                 $r = $control.Current.BoundingRectangle
                 if (!$control -or $control.Current.IsOffscreen -or $r.IsEmpty -or $r.Left -lt $row.Right -or $r.Right -gt $window.Right) { return }
@@ -91,8 +91,11 @@ function CheckSettingsLayout($settings) {
                 if ($width -gt $narrow -and $id -eq 'ResetFontsButton' -and $r.Right -le $window.Left + $narrow * $scale) { return }
             }
             $sample = (FindId TerminalPreviewSample $settings).Current.BoundingRectangle
+            $heading = FindId TypographyHeading $settings
+            if ($heading.Current.Name -cne 'Typography' -or $heading.GetCurrentPropertyValue([AutomationElement]::HeadingLevelProperty) -ne 'Level2') { return }
             if ($sample.Top -lt (FindId TerminalPageHeading $settings).Current.BoundingRectangle.Bottom -or
-                $sample.Bottom -gt (FindId FontSettingsCard $settings).Current.BoundingRectangle.Top) { return }
+                $sample.Bottom -gt $heading.Current.BoundingRectangle.Top -or
+                $heading.Current.BoundingRectangle.Bottom -gt (FindId FontSettingsCard $settings).Current.BoundingRectangle.Top) { return }
             $togglePane = FindId TogglePaneButton $nav
             if ($togglePane -and !$togglePane.Current.IsOffscreen) { throw 'Settings navigation can be collapsed' }
             $row.Width

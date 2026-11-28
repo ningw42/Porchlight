@@ -14,9 +14,11 @@
     </DataTemplate>
   </Page.Resources>
   <ScrollViewer MaxWidth="840" VerticalScrollBarVisibility="Auto">
-    <StackPanel Padding="24" Spacing="16">
-      <TextBlock x:Name="TerminalPageHeading" Text="Terminal" Style="{ThemeResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+    <StackPanel Padding="24">
+      <TextBlock x:Name="TerminalPageHeading" Text="Terminal" Margin="0,0,0,16" Style="{ThemeResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
       <local:TerminalAppearancePreview x:Name="AppearancePreview" />
+
+      <TextBlock x:Name="TypographyHeading" Text="Typography" Margin="0,24,0,8" Style="{ThemeResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
       <controls:SettingsCard x:Name="FontSettingsCard" Header="Font families" ContentAlignment="Vertical">
         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
           <controls:TokenizingTextBox x:Name="TerminalFontPicker" AutomationProperties.Name="Terminal font families"
