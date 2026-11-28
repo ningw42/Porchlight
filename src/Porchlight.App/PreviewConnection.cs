@@ -12,6 +12,7 @@ internal sealed partial class PreviewConnection(DispatcherQueue dispatcher, Acti
     // Give the end cursor a blank cell even when the last wide glyph fills the right margin.
     const string Sample = "C:\\work> \x1b[33mgit\x1b[m diff\r\n└─ != => ffi 0123456789 日本語 ";
     int started, pending;
+    internal bool CursorBlink { get; set; }
     public Guid SessionId { get; } = Guid.NewGuid();
     public ConnectionState State => ConnectionState.Connected; // No transport state transitions.
     public event TypedEventHandler<ITerminalConnection, object> StateChanged { add { } remove { } }
@@ -27,7 +28,9 @@ internal sealed partial class PreviewConnection(DispatcherQueue dispatcher, Acti
             Interlocked.Exchange(ref pending, 0);
             if (Volatile.Read(ref started) == 0) return;
             // Clear the previous viewport AND history; a narrower reflow may have scrolled the prompt away.
-            TerminalOutput?.Invoke(("\x1b[H\x1b[2J\x1b[3J\x1b[H" + Sample).ToCharArray());
+            // DEC private mode 12 controls blinking independently of the configured cursor shape.
+            var blinkMode = CursorBlink ? "\x1b[?12h" : "\x1b[?12l";
+            TerminalOutput?.Invoke(("\x1b[H\x1b[2J\x1b[3J\x1b[H" + Sample + blinkMode).ToCharArray());
             fit(this);
         });
     }

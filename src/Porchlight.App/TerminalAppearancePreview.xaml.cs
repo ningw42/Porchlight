@@ -26,14 +26,15 @@ public sealed partial class TerminalAppearancePreview : UserControl
         PreviewHost.Close(TerminalPreviewSample);
     }
 
-    internal void Update(ulong hwnd, TerminalScheme? scheme, TerminalFont font, CursorStyle cursor)
+    internal void Update(ulong hwnd, TerminalScheme? scheme, TerminalFont font, CursorStyle cursor, bool blink)
     {
         ToolTipService.SetToolTip(TerminalPreviewSample, font.Face);
-        AutomationProperties.SetHelpText(TerminalPreviewSample, $"{cursor} cursor");
+        AutomationProperties.SetHelpText(TerminalPreviewSample, blink ? $"Blinking {cursor} cursor" : $"{cursor} cursor");
         try
         {
             var settings = TerminalSettings.Create(font, scheme, cursor);
             var connection = output ?? new PreviewConnection(DispatcherQueue, FitSample);
+            connection.CursorBlink = blink;
             PreviewHost.Show(TerminalPreviewSample, hwnd, settings, connection);
             output = connection;
             connection.Refresh();

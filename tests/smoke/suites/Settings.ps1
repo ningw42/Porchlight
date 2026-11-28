@@ -214,7 +214,7 @@ function CursorOptions($settings) {
         $picker.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::IsSelectionItemPatternAvailableProperty, $true))
     }
 }
-function CheckCursorShapes($settings) {
+function CheckCursorSettings($settings) {
     $options = @(CursorOptions $settings)
     if (($options.Current.Name -join ',') -cne 'Vintage,Bar,Underscore,FilledBox,EmptyBox') { throw 'Unexpected cursor options or order' }
     foreach ($item in $options) {
@@ -224,13 +224,20 @@ function CheckCursorShapes($settings) {
     }
     $sample = FindId TerminalPreviewSample $settings
     $selected = [SelectionItemPattern]::Pattern
-    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Vintage cursor') { throw 'Expected the live Vintage cursor in the preview' }
+    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Blinking Vintage cursor') { throw 'Expected the live Vintage cursor in the preview' }
+    $toggle = FindId CursorBlinkSwitch $settings
+    $blink = $toggle.GetCurrentPattern([TogglePattern]::Pattern)
+    if ($toggle.Current.Name -cne 'Cursor blink' -or $blink.Current.ToggleState -ne 'On') { throw 'Expected a blinking cursor by default' }
+    $blink.Toggle()
+    [void](WaitFor 'steady Vintage cursor' { $sample.Current.HelpText -ceq 'Vintage cursor' })
     foreach ($item in $options[1..4]) {
         $item.GetCurrentPattern($selected).Select()
         [void](WaitFor "preview $($item.Current.Name) cursor" {
             $item.GetCurrentPattern($selected).Current.IsSelected -and $sample.Current.HelpText -ceq "$($item.Current.Name) cursor"
         })
     }
+    $blink.Toggle()
+    [void](WaitFor 'blinking cursor without changing shape' { $sample.Current.HelpText -ceq 'Blinking EmptyBox cursor' })
 }
 function CheckFontPicker($settings, $text) {
     $picker = WaitFor 'terminal font picker' {
@@ -399,6 +406,10 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckNoGatewayControls $root
     $settings = OpenSettings # The fake peer has not even read the gateway hello.
     [void](WaitForTerminalText TerminalPreviewSample $settings $previewLines)
+    # Leave both cursor controls non-default; CheckCursorSettings verifies the reset after reopening.
+    (CursorOptions $settings)[1].GetCurrentPattern([SelectionItemPattern]::Pattern).Select()
+    (FindId CursorBlinkSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern).Toggle()
+    [void](WaitFor 'steady Bar cursor before close' { (FindId TerminalPreviewSample $settings).Current.HelpText -ceq 'Bar cursor' })
     CloseSettings $settings
 } -Test {
     CheckNoGatewayControls $root
@@ -424,7 +435,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckFontPicker $settings $text
     CheckFontSize $settings $text
     CheckOpenTypePicker $settings
-    CheckCursorShapes $settings
+    CheckCursorSettings $settings
     if ($CheckFocus) {
         [void](WaitFor 'main window active with Settings open' {
             [PorchlightChrome]::GetForegroundWindow() -eq $hwnd -or [PorchlightChrome]::SetForegroundWindow($hwnd)
@@ -437,8 +448,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     foreach ($cycle in 1..6) {
         $settings = OpenSettings
         $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
-        if ((FindId TerminalPreviewSample $settings).Current.HelpText -cne 'Vintage cursor' -or
-            (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -ne 14 -or
+        if ((FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -ne 14 -or
             (TerminalRowHeight $text 'git') -ne $liveHeight -or
             $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -cne $launchFace) { throw "Preview did not reset on reopen $cycle" }
         (FindId TerminalFontPicker $settings).GetCurrentPattern([ValuePattern]::Pattern).SetValue('Consolas,')

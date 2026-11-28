@@ -55,7 +55,7 @@ Use `--machine=yuki` to start on that configured remote instead of Local. To ope
 
 Focus **OpenType features** to browse the first installed family’s remaining tags, or type a prefix such as `ss`. Tags with a verified off/on preview appear first, followed by tags without one; each group is alphabetical, even when searching. The preview shows the shortest part of a sample that still changes: a single character when possible, a pair for kerning, or a cluster when needed. A dash means no example was found, not that the feature is unsupported. Adding a chip enables that tag; removing it explicitly disables it. **Reset ligatures and OpenType features** restores the launch overrides.
 
-Under **Cursor → Shape**, the preview starts with the live terminal’s **Vintage** cursor. Choose **Bar**, **Underscore**, **FilledBox** or **EmptyBox** to compare shapes at the end of the sample. Picker icons use the preview’s measured cell proportions, including imported cell width and height.
+Under **Cursor → Shape**, the preview starts with the live terminal’s **Vintage** cursor. Choose **Bar**, **Underscore**, **FilledBox** or **EmptyBox** to compare shapes at the end of the sample. Picker icons use the preview’s measured cell proportions, including imported cell width and height. Turn off **Blink** below the shape picker for a steady cursor.
 
 The preview uses the same native terminal control, launch font settings and color scheme as the live pane. Porchlight supplies its own sample output; the preview never opens a shell, connects to a gateway, or accepts input. Closing Settings discards edits; it never changes the live pane or saves settings.
 

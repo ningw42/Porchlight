@@ -66,7 +66,7 @@ public sealed partial class TerminalSettingsPage : Page
 
     internal void ClosePreview() => AppearancePreview.Close();
 
-    void CursorShapeChanged(object sender, SelectionChangedEventArgs e) => UpdatePreview();
+    void CursorChanged(object sender, RoutedEventArgs e) => UpdatePreview();
 
     void UpdatePreview()
     {
@@ -74,7 +74,7 @@ public sealed partial class TerminalSettingsPage : Page
             CursorShapePicker.SelectedItem is not SegmentedItem { Content: CursorVisual icon }) return;
         var face = families.Count == 0 ? context.Font.Face : FontFamilyList.Format(families);
         var font = context.Font with { Face = face, Size = (float)TerminalFontSize.Value, Features = new(features.Values) };
-        AppearancePreview.Update(context.Hwnd, context.Scheme, font, icon.Shape);
+        AppearancePreview.Update(context.Hwnd, context.Scheme, font, icon.Shape, CursorBlinkSwitch.IsOn);
     }
 
     void Suggest(string query)

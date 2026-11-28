@@ -68,7 +68,11 @@
       <TextBlock Text="Cursor" Margin="0,24,0,8" Style="{ThemeResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
       <controls:SettingsCard Header="Shape">
         <local:AccessibleSegmented x:Name="CursorShapePicker" AutomationProperties.Name="Cursor shape"
-                                   SelectionMode="Single" SelectionChanged="CursorShapeChanged" />
+                                   SelectionMode="Single" SelectionChanged="CursorChanged" />
+      </controls:SettingsCard>
+      <controls:SettingsCard Header="Blink">
+        <ToggleSwitch x:Name="CursorBlinkSwitch" AutomationProperties.Name="Cursor blink" IsOn="True"
+                      Toggled="CursorChanged" MinWidth="0" OnContent="" OffContent="" />
       </controls:SettingsCard>
     </StackPanel>
   </ScrollViewer>
