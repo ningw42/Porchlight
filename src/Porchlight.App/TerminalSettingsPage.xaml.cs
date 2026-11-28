@@ -90,19 +90,13 @@ public sealed partial class TerminalSettingsPage : Page
         FeaturePicker.Text = "";
         SuggestFeatures("");
         FeatureStatus.Visibility = Visibility.Collapsed;
-        LigatureExample.Visibility = Visibility.Collapsed;
         try
         {
             if (family.Length == 0) { ShowFeatureStatus("No installed font in the list."); return; }
             var result = await Task.Run(() => FontFeatureProbe.Discover(family, request.Token), request.Token);
             if (request.IsCancellationRequested) return;
-            if (result.LigatureSample is { } sample)
-            {
-                LigatureExample.SetLigatureSample(family, sample);
-                LigatureExample.Visibility = Visibility.Visible;
-            }
-            if (result.Features.Count == 0) { ShowFeatureStatus($"No individual OpenType features found in {family}."); return; }
-            candidates = result.Features.ToDictionary(c => c.Tag, StringComparer.Ordinal);
+            if (result.Length == 0) { ShowFeatureStatus($"No individual OpenType features found in {family}."); return; }
+            candidates = result.ToDictionary(c => c.Tag, StringComparer.Ordinal);
             SuggestFeatures(FeaturePicker.Text);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -160,12 +154,16 @@ public sealed partial class TerminalSettingsPage : Page
 
     void FeaturePickerFocused(object sender, RoutedEventArgs e)
     {
-        if (e.OriginalSource is TextBox editor && editor.FindAscendant<AutoSuggestBox>() is { } box)
+        // Open only on entry. The token control can raise GotFocus again on Escape key-up.
+        if (e.OriginalSource is TextBox editor && editor.FindAscendant<AutoSuggestBox>() is { } box &&
+            box.FindDescendant<Popup>() is { } popup && popup != featurePopup)
         {
-            TrackFeaturePopup(box.FindDescendant<Popup>());
+            TrackFeaturePopup(popup);
             box.IsSuggestionListOpen = box.Items.Count != 0;
         }
     }
+
+    void FeaturePickerLostFocus(object sender, RoutedEventArgs e) => TrackFeaturePopup(null);
 
     void FeatureQueryChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {

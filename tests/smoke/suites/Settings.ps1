@@ -25,6 +25,28 @@ function OpenSettings {
     }
     $settings
 }
+function VisibleSuggestions($settings) {
+    $settings.FindFirst('Descendants', [AndCondition]::new(
+        [PropertyCondition]::new([AutomationElement]::AutomationIdProperty, 'SuggestionsList'),
+        [PropertyCondition]::new([AutomationElement]::IsOffscreenProperty, $false)))
+}
+function CheckCategoryFocus($settings) {
+    [void](WaitFor 'Terminal category focused with both suggestion lists closed' {
+        (FindId TerminalCategory $settings).Current.HasKeyboardFocus -and !(VisibleSuggestions $settings)
+    })
+}
+function SendSettingsKey($settings, [int]$key, [int]$scan) {
+    # Address only this fixture's Settings input site, never the desktop keyboard.
+    $site = $settings.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'InputSiteWindowClass'))
+    $child = [IntPtr]$site.Current.NativeWindowHandle
+    if ($child -eq [IntPtr]::Zero -or $site.Current.ProcessId -ne $viewer.Id -or [PorchlightChrome]::GetForegroundWindow() -ne [IntPtr]$settings.Current.NativeWindowHandle) {
+        throw 'No active fixture Settings input site'
+    }
+    $down = ($scan -shl 16) -bor 1
+    if (![PorchlightChrome]::PostMessage($child, 0x100, $key, $down) -or ![PorchlightChrome]::PostMessage($child, 0x101, $key, (0xc0000000L -bor $down))) {
+        throw "Could not send key $key to Settings"
+    }
+}
 function CloseSettings($settings) {
     $settings.GetCurrentPattern([WindowPattern]::Pattern).Close()
     [void](WaitFor 'Settings window to close' { !(FindSettings) })
@@ -112,7 +134,9 @@ function CheckOpenTypePicker($settings) {
         $p = FindId FeaturePicker $settings; if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
     }
     $value = $picker.GetCurrentPattern([ValuePattern]::Pattern)
-    $switch = (FindId CodingLigaturesSwitch $settings).GetCurrentPattern([TogglePattern]::Pattern)
+    $ligatures = FindId CodingLigaturesSwitch $settings
+    if ($ligatures.Current.Name -cne 'Ligatures') { throw 'Expected a switch named Ligatures' }
+    $switch = $ligatures.GetCurrentPattern([TogglePattern]::Pattern)
     $reset = FindId ResetFeaturesButton $settings
     $listItem = [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::ListItem)
     $fixturePid = [PropertyCondition]::new([AutomationElement]::ProcessIdProperty, $viewer.Id)
@@ -142,14 +166,25 @@ function CheckOpenTypePicker($settings) {
     }
 
     [void](WaitFor 'launch ligatures on, no individual chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'On' -and !$reset.Current.IsEnabled })
-    [void](WaitFor 'verified Cascadia operator beside switch' {
-        $settings.FindAll('Descendants', [PropertyCondition]::new([AutomationElement]::ControlTypeProperty, [ControlType]::Text)) |
-            Where-Object { !$_.Current.IsOffscreen -and $_.Current.Name -cmatch '^Coding ligatures off then on: [^\w\s]{2,}$' } | Select-Object -First 1
-    })
     $switch.Toggle()
     [void](WaitFor 'disabling ligatures is independent of feature chips' { (ChipsAre @()) -and $switch.Current.ToggleState -eq 'Off' -and $reset.Current.IsEnabled })
-    QueryFeatures 'ca'
-    [void](WaitFor 'ca offers case, not the grouped calt tag' { (Suggestion case) -and !(Suggestion calt) })
+    if ($CheckFocus) {
+        $edit = FindId TextBox $picker
+        $edit.SetFocus()
+        [void](WaitFor 'feature suggestions open on deliberate focus' { $edit.Current.HasKeyboardFocus -and (VisibleSuggestions $settings) })
+        SendSettingsKey $settings 0x1b 0x01 # Escape
+        [void](WaitFor 'dismiss initial suggestions without committing a token' {
+            $edit.Current.HasKeyboardFocus -and !(VisibleSuggestions $settings) -and (ChipsAre @())
+        })
+        SendSettingsKey $settings 0x43 0x2e # C
+        [void](WaitFor 'typed c in feature editor' { $value.Current.Value -ceq 'c' -and (Suggestion case) })
+        SendSettingsKey $settings 0x1b 0x01 # Escape
+        [void](WaitFor 'one Escape closes suggestions without leaving the editor or changing its text' {
+            $edit.Current.HasKeyboardFocus -and $value.Current.Value -ceq 'c' -and !(VisibleSuggestions $settings)
+        })
+        SendSettingsKey $settings 0x41 0x1e # A, without refocusing the editor
+    } else { QueryFeatures 'ca' }
+    [void](WaitFor 'ca offers case, not the grouped calt tag' { $value.Current.Value -ceq 'ca' -and (Suggestion case) -and !(Suggestion calt) })
     QueryFeatures 'm'
     [void](WaitFor 'previewed matches first; the other tags remain alphabetical and selectable' {
         $rows = @(foreach ($tag in 'mark','medi','mkmk') { Suggestion $tag })
@@ -211,6 +246,7 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     CheckNoGatewayControls $root
     SelectSpace core-local Personal $personal t75
     $settings = OpenSettings
+    if ($CheckFocus) { CheckCategoryFocus $settings }
     CheckScope core-local Personal $personal t75
     CheckSettingsLayout $settings
     CheckFontPicker $settings

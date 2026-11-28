@@ -17,8 +17,7 @@
     <StackPanel Padding="24" Spacing="16">
       <TextBlock x:Name="TerminalPageHeading" Text="Terminal" Style="{ThemeResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
       <local:TerminalAppearancePreview x:Name="AppearancePreview" />
-      <controls:SettingsCard x:Name="FontSettingsCard" Header="Font families" Description="Add fonts in fallback order. Changes only affect the preview."
-                             ContentAlignment="Vertical">
+      <controls:SettingsCard x:Name="FontSettingsCard" Header="Font families" ContentAlignment="Vertical">
         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
           <controls:TokenizingTextBox x:Name="TerminalFontPicker" AutomationProperties.Name="Terminal font families"
               PlaceholderText="Type a font name…" TokenDelimiter="," TextChanged="FontQueryChanged" TokenItemAdding="FontAdding"
@@ -34,18 +33,15 @@
           </Button>
         </Grid>
       </controls:SettingsCard>
-      <controls:SettingsCard Header="Coding ligatures">
-        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-          <local:FeatureComparison x:Name="LigatureExample" Visibility="Collapsed" />
-          <ToggleSwitch x:Name="CodingLigaturesSwitch" AutomationProperties.Name="Coding ligatures"
-                        Toggled="LigaturesToggled" MinWidth="0" OnContent="" OffContent="" />
-        </StackPanel>
+      <controls:SettingsCard Header="Ligatures">
+        <ToggleSwitch x:Name="CodingLigaturesSwitch" AutomationProperties.Name="Ligatures"
+                      Toggled="LigaturesToggled" MinWidth="0" OnContent="" OffContent="" />
       </controls:SettingsCard>
       <controls:SettingsCard x:Name="FeaturesCard" Header="OpenType features" ContentAlignment="Vertical">
         <StackPanel Spacing="8">
           <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
             <controls:TokenizingTextBox x:Name="FeaturePicker" AutomationProperties.Name="OpenType features"
-                PlaceholderText="Type a feature tag…" TokenDelimiter="," TextChanged="FeatureQueryChanged" GotFocus="FeaturePickerFocused"
+                PlaceholderText="Type a feature tag…" TokenDelimiter="," TextChanged="FeatureQueryChanged" GotFocus="FeaturePickerFocused" LostFocus="FeaturePickerLostFocus"
                 TokenItemAdding="FeatureAdding" TokenItemAdded="FeatureAdded" TokenItemRemoved="FeatureRemoved"
                 SuggestedItemTemplate="{StaticResource FeatureSuggestionTemplate}">
               <controls:TokenizingTextBox.Resources>

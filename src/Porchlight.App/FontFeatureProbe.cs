@@ -10,7 +10,6 @@ using WinRT.Interop;
 namespace Porchlight.App;
 
 internal sealed record FontFeatureCandidate(string Tag, string? Sample, bool Italic = false);
-internal sealed record FontFeatureProbeResult(IReadOnlyList<FontFeatureCandidate> Features, string? LigatureSample);
 
 internal static class FontFeatureProbe
 {
@@ -29,16 +28,10 @@ internal static class FontFeatureProbe
         "亜悪圧囲", "国学体", "あアカナ", "ｱｲｳ", "ＡＢ１２", "。、（）", "한글",
     ];
 
-    static readonly string[] Operators =
-    [
-        "=>", "!=", "->", "==", "<=", ">=", "<-", "&&", "||", "::", ":=", "|>", "<|", "~=", "++",
-        "--", "**", "//", "/*", "*/", "<<", ">>", "??", "?.", "===", "!==", "<=>", "...", ">>>",
-    ];
-
-    internal static FontFeatureProbeResult Discover(string family, CancellationToken cancellationToken)
+    internal static FontFeatureCandidate[] Discover(string family, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (string.IsNullOrWhiteSpace(family)) return new([], null);
+        if (string.IsNullOrWhiteSpace(family)) return [];
 
         // Exact WWS family (any locale), not a layout resolved with system fallback. Don't close
         // shared Win2D system-set/face wrappers: another probe or a layout can be using them.
@@ -51,25 +44,18 @@ internal static class FontFeatureProbe
             OpenTypeFeatureTags.Collect(face, tags, cancellationToken);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        if (tags.Count == 0) return new([], null);
-
-        bool probeLigatures = CodingLigatures.Tags.Any(tags.Contains);
         tags.RemoveWhere(CodingLigatures.IsExcludedFromPicker);
+        if (tags.Count == 0) return [];
         var candidates = tags.ToDictionary(FeatureName, t => new FontFeatureCandidate(t, null));
-        string? ligatureSample;
         using (var normal = Format(family, FontStyle.Normal))
-        {
-            var probe = new StyleProbe(familyFonts, normal, cancellationToken);
-            ligatureSample = probeLigatures ? probe.FindLigatureSample() : null;
-            probe.FindSamples(candidates);
-        }
+            new StyleProbe(familyFonts, normal, cancellationToken).FindSamples(candidates);
         if (candidates.Values.Any(c => c.Sample == null))
         {
             using var italic = Format(family, FontStyle.Italic);
             new StyleProbe(familyFonts, italic, cancellationToken).FindSamples(candidates);
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return new(candidates.Values.ToArray(), ligatureSample);
+        return candidates.Values.ToArray();
     }
 
     // DWRITE_MAKE_OPENTYPE_TAG: include raw values not named by the Win2D enum.
@@ -82,10 +68,10 @@ internal static class FontFeatureProbe
         FontWeight = new FontWeight { Weight = 400 }, FontStretch = FontStretch.Normal, FontStyle = style,
     };
 
-    static CanvasTypography Typography(uint value, params ReadOnlySpan<CanvasTypographyFeatureName> tags)
+    static CanvasTypography Typography(uint value, CanvasTypographyFeatureName tag)
     {
         var settings = new CanvasTypography();
-        foreach (var tag in tags) settings.AddFeature(tag, value);
+        settings.AddFeature(tag, value);
         return settings;
     }
 
@@ -126,16 +112,6 @@ internal static class FontFeatureProbe
             var levels = analyzer.GetBidi(SampleLocale);
             if (scripts.Count != 1 || scripts[0].Key != range || levels.Count != 1 || levels[0].Key != range) return null;
             return new(analyzer, range, face, index, scripts[0].Value, (levels[0].Value.ResolvedLevel & 1) != 0);
-        }
-
-        public string? FindLigatureSample()
-        {
-            var group = CodingLigatures.Tags.Select(FeatureName).ToArray();
-            using var off = Typography(0, group);
-            using var on = Typography(1, group);
-            foreach (var op in Operators)
-                if (Analyze(op) is { } run && run.Face.Style == FontStyle.Normal && run.Changes(off, on)) return op;
-            return null;
         }
 
         public void FindSamples(Dictionary<CanvasTypographyFeatureName, FontFeatureCandidate> candidates)

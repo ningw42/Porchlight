@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI.Text;
-using Porchlight.Core.Configuration;
 
 namespace Porchlight.App;
 
@@ -18,7 +17,7 @@ public sealed class FeatureComparison : Grid
         FontSize = FontFeatureProbe.SampleFontSize, Language = FontFeatureProbe.SampleLocale
     };
     readonly OpenTypeDrawing drawing;
-    IReadOnlyList<string> tags = [];
+    CanvasTypographyFeatureName feature;
     string sample = "";
 
     public FeatureComparison()
@@ -32,15 +31,8 @@ public sealed class FeatureComparison : Grid
         drawing = new(this, text, Compare, unavailable);
     }
 
-    public void SetSample(string family, string tag, string? sample, bool italic) =>
-        Configure(family, tag, [tag], sample, italic);
-
-    public void SetLigatureSample(string family, string sample) =>
-        Configure(family, "Coding ligatures", CodingLigatures.Tags, sample, false);
-
-    void Configure(string family, string label, IReadOnlyList<string> tags, string? sample, bool italic)
+    public void SetSample(string family, string tag, string? sample, bool italic)
     {
-        this.tags = tags;
         this.sample = sample ?? "";
         if (sample == null)
         {
@@ -48,10 +40,11 @@ public sealed class FeatureComparison : Grid
             drawing.Invalidate(); // No demonstrated change: show the dash, including for a recycled row.
             return;
         }
+        feature = OpenTypeDrawing.Tag(tag);
         text.FontFamily = new FontFamily(family);
         text.FontStyle = italic ? FontStyle.Italic : FontStyle.Normal;
         text.Text = sample + Arrow + sample;
-        AutomationProperties.SetName(text, $"{label} off then on: {sample}{(italic ? " (italic)" : "")}");
+        AutomationProperties.SetName(text, $"{tag} off then on: {sample}{(italic ? " (italic)" : "")}");
         drawing.Invalidate();
     }
 
@@ -59,12 +52,8 @@ public sealed class FeatureComparison : Grid
     {
         var off = new CanvasTypography();
         var on = new CanvasTypography();
-        foreach (var tag in tags)
-        {
-            var name = OpenTypeDrawing.Tag(tag);
-            off.AddFeature(name, 0);
-            on.AddFeature(name, 1);
-        }
+        off.AddFeature(feature, 0);
+        on.AddFeature(feature, 1);
         layout.SetFontFamily(0, text.Text.Length, text.FontFamily.Source);
         var middle = sample.Length;
         layout.SetTypography(0, sample.Length, off);

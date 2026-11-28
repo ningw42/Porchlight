@@ -14,6 +14,7 @@ public static class PorchlightChrome {
         // SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE
         if (!SetWindowPos(hwnd, IntPtr.Zero, 0, 0, w, h, 0x16)) throw new System.ComponentModel.Win32Exception();
     }
+    [DllImport("user32")] public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32")] static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     public static int Hit(IntPtr hwnd, int x, int y) =>
         (int)SendMessage(hwnd, 0x0084, IntPtr.Zero, (IntPtr)((x & 0xffff) | (y << 16)));

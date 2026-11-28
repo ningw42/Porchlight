@@ -1,8 +1,8 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Windows.Graphics;
 using Porchlight.Core.Configuration;
+using Windows.Graphics;
 
 namespace Porchlight.App;
 
@@ -14,6 +14,8 @@ public sealed partial class SettingsWindow : Window
     {
         this.launchFont = launchFont;
         InitializeComponent();
+        // Give the window a focus target before the page chooses its first editor.
+        CategoryPage.Loaded += (_, _) => TerminalCategory.Focus(FocusState.Programmatic);
         Categories.SelectedItem = TerminalCategory;
 
         // Size in DIPs on the viewer's monitor; AppWindow coordinates are physical pixels.
