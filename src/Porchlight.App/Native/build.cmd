@@ -8,5 +8,6 @@ if not defined install (
 )
 call "%install%\Common7\Tools\VsDevCmd.bat" -no_logo -arch=x64 -host_arch=x64 >nul || exit /b 1
 pushd "%~1" || exit /b 1
-cl /nologo /O2 /MT /EHsc /std:c++20 /LD "%~dp0NativeFeatures.cpp" /link /MACHINE:X64 /IMPLIB:NativeFeatures.lib /OUT:"%~2" windowsapp.lib
+cppwinrt @projection.rsp -output generated || exit /b 1
+cl /nologo /O2 /MT /EHsc /bigobj /std:c++20 /Igenerated /LD "%~dp0NativeFeatures.cpp" "%~dp0PreviewHost.cpp" /link /MACHINE:X64 /IMPLIB:NativeFeatures.lib /OUT:"%~2" windowsapp.lib
 exit /b %errorlevel%

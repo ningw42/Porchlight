@@ -46,7 +46,7 @@ internal static class FontFeatureProbe
         cancellationToken.ThrowIfCancellationRequested();
         tags.RemoveWhere(CodingLigatures.IsExcludedFromPicker);
         if (tags.Count == 0) return [];
-        var candidates = tags.ToDictionary(FeatureName, t => new FontFeatureCandidate(t, null));
+        var candidates = tags.ToDictionary(OpenTypeFeatureTags.ToFeatureName, t => new FontFeatureCandidate(t, null));
         using (var normal = Format(family, FontStyle.Normal))
             new StyleProbe(familyFonts, normal, cancellationToken).FindSamples(candidates);
         if (candidates.Values.Any(c => c.Sample == null))
@@ -57,10 +57,6 @@ internal static class FontFeatureProbe
         cancellationToken.ThrowIfCancellationRequested();
         return candidates.Values.ToArray();
     }
-
-    // DWRITE_MAKE_OPENTYPE_TAG: include raw values not named by the Win2D enum.
-    static CanvasTypographyFeatureName FeatureName(string t) =>
-        (CanvasTypographyFeatureName)(t[0] | t[1] << 8 | t[2] << 16 | t[3] << 24);
 
     static CanvasTextFormat Format(string family, FontStyle style) => new()
     {
@@ -168,8 +164,16 @@ internal static class FontFeatureProbe
 
 // Win2D exposes feature enumeration only for a given script/language. The GSUB and GPOS
 // FeatureLists contain all raw tags, including private ones and ones with no horizontal sample.
-file static unsafe class OpenTypeFeatureTags
+internal static unsafe class OpenTypeFeatureTags
 {
+    internal static CanvasTypographyFeatureName ToFeatureName(string tag)
+    {
+        if (tag.Length != 4 || tag.Any(ch => ch is < ' ' or > '~'))
+            throw new ArgumentException("Expected a four-character OpenType tag.", nameof(tag));
+        // DWRITE_MAKE_OPENTYPE_TAG, including names absent from the Win2D enum.
+        return (CanvasTypographyFeatureName)(tag[0] | tag[1] << 8 | tag[2] << 16 | tag[3] << 24);
+    }
+
     internal static void Collect(CanvasFontFace face, HashSet<string> tags, CancellationToken token)
     {
         // Microsoft.Graphics.Canvas.native.h: the public ICanvasResourceWrapperNative interop

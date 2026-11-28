@@ -59,13 +59,7 @@ public sealed partial class MainWindow
 
     void MountPane(CoreSession gateway, Target target, string label, long version, object? selectionFocus)
     {
-        var font = options.Font;
-        var settings = new TerminalSettings(options.Scheme) {
-            FontFace = font.Face, FontSize = font.Size, FontWeight = new() { Weight = font.Weight },
-            CellHeight = font.CellHeight, CellWidth = font.CellWidth,
-            EnableBuiltinGlyphs = font.BuiltinGlyphs, EnableColorGlyphs = font.ColorGlyphs,
-            FontFeatures = NativeFeatures.Create(font.Features), FontAxes = NativeFeatures.Create(font.Axes)
-        };
+        var settings = TerminalSettings.Create(options.Font, options.Scheme);
         var bridge = connection = new PaneConnection(gateway, target.MachineId, target.Address);
         var control = pane = new TermControl(settings, settings, bridge) { OwningHwnd = (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this) };
         bool Current() => version == revision && connection == bridge && !closing;

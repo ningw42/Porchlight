@@ -61,6 +61,108 @@ function CheckNoGatewayControls($within) {
         if ($button.Current.Name -match '^(Refresh|Retry)\b') { throw "Obsolete action: $($button.Current.Name)" }
     }
 }
+$previewLines = @('C:\work> git diff', '└─ != => ffi 0123456789 日本語')
+function WaitForTerminalText($hostId, $within, [string[]]$expected) {
+    WaitFor "$hostId native terminal buffer: $($expected -join ' / ')" {
+        $frame = FindId $hostId $within
+        if (!$frame) { return }
+        $pane = $frame.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'))
+        $text = $null
+        if (!$pane -or !$pane.TryGetCurrentPattern([TextPattern]::Pattern, [ref]$text)) { return }
+        $screen = $text.DocumentRange.GetText(-1)
+        foreach ($line in $expected) { if (!$screen.Contains($line)) { return } }
+        $text
+    }
+}
+function TerminalRowHeight($text, $word) {
+    # TermControl exposes cell geometry through text ranges, not the FontSize attribute.
+    $match = $text.DocumentRange.FindText($word, $false, $false)
+    if ($match) {
+        $rects = $match.GetBoundingRectangles()
+        if ($rects.Count -eq 1) { $rects[0].Height }
+    }
+}
+function CheckPreviewPointer($settings, $text) {
+    $pane = $text.DocumentRange.GetEnclosingElement()
+    if ($pane.Current.ClassName -cne 'TermControl' -or $pane.Current.IsEnabled) { throw 'Expected a disabled native preview' }
+    if (!$CheckFocus) { return } # Like Tab, screen hit-testing requires the foreground fixture.
+    Add-Type -Namespace PorchlightSmoke -Name PreviewPointer -MemberDefinition @'
+[DllImport("user32")] public static extern IntPtr WindowFromPhysicalPoint(System.Drawing.Point point);
+[DllImport("user32")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+'@
+    $window = $settings.Current.NativeWindowHandle
+    $ancestor = [TreeWalker]::new([OrCondition]::new(
+        [PropertyCondition]::new([AutomationElement]::ClassNameProperty, 'TermControl'),
+        [PropertyCondition]::new([AutomationElement]::NativeWindowHandleProperty, $window)))
+    [void](WaitFor 'Settings owns the preview point and hits outside the disabled terminal' {
+        $r = $pane.Current.BoundingRectangle
+        if ($r.IsEmpty -or $r.Width -le 0 -or $r.Height -le 0) { return }
+        $p = [Drawing.Point]::new($r.X + $r.Width / 2, $r.Y + $r.Height / 2)
+        $under = [PorchlightSmoke.PreviewPointer]::WindowFromPhysicalPoint($p)
+        if ([PorchlightSmoke.PreviewPointer]::GetAncestor($under, 2) -ne [IntPtr]$window) { return }
+        $hit = [AutomationElement]::FromPoint([Windows.Point]::new($p.X, $p.Y))
+        $hit -and $hit.Current.ProcessId -eq $viewer.Id -and $settings.Equals($ancestor.Normalize($hit))
+    })
+}
+function CheckPreviewViewport($settings, $text, $launchHeight) {
+    $window = [IntPtr]$settings.Current.NativeWindowHandle
+    $scale = [PorchlightChrome]::GetDpiForWindow($window) / 96.0
+    $original = $settings.Current.BoundingRectangle
+    $frame = FindId TerminalPreviewSample $settings
+    $scrollable = [TreeWalker]::new([PropertyCondition]::new([AutomationElement]::IsScrollPatternAvailableProperty, $true))
+    $page = $scrollable.GetParent($frame) # Only scroll the enclosing Settings page, never the terminal.
+    $scroll = $page.GetCurrentPattern([ScrollPattern]::Pattern)
+    $size = (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern)
+    $specimen = ($previewLines -join '') -creplace '\s', ''
+    # Return to a smaller effective size between 100 and 128: a stale 100-pt frame must not pass.
+    foreach ($step in (920,14),(920,32),(920,14),(550,100),(550,14),(550,128),(920,14)) {
+        $width, $pt = $step
+        if ($scroll.Current.VerticallyScrollable) { $scroll.SetScrollPercent(-1, 0) }
+        [PorchlightChrome]::Resize($window, $width * $scale, $original.Height)
+        $size.SetValue($pt)
+        $cell = WaitFor "visible specimen and end cursor at $width DIPs / $pt pt" {
+            $bounds = $frame.Current.BoundingRectangle
+            if ($scroll.Current.VerticalScrollPercent -gt 0) { $scroll.SetScrollPercent(-1, 0); return }
+            if ($size.Current.Value -ne $pt -or $bounds.IsEmpty -or
+                [Math]::Abs($settings.Current.BoundingRectangle.Width / $scale - $width) -gt 16 -or
+                ($bounds.Width / $scale -gt 550) -ne ($width -eq 920)) { return }
+            # GetVisibleRanges excludes scrollback. Tiny grids can insert line breaks/padding between glyphs.
+            $visible = ($text.GetVisibleRanges() | ForEach-Object { $_.GetText(-1) }) -join ''
+            if (($visible -creplace '\s', '') -cne $specimen) { return }
+            $doc = $text.DocumentRange
+            $first = $doc.FindText('C', $false, $false).GetBoundingRectangles()
+            if ($first.Count -ne 1 -or $first[0].Height -le 0) { return }
+            $h = $first[0].Height # One ASCII cell even when words wrap across many rows.
+            if (($pt -eq 14 -and $h -ne $launchHeight) -or ($pt -eq 32 -and $h -le $launchHeight) -or
+                ($pt -eq 100 -and $h -le $mediumHeight) -or ($pt -eq 128 -and $h -ne $capHeight)) { return }
+            $last = $doc.FindText('語', $false, $false)
+            $last.ExpandToEnclosingUnit('Character') # Both cells of the final wide glyph.
+            $caret = $text.GetSelection()[0] # TermControl returns a degenerate range at the native cursor.
+            if (!$caret -or $caret.GetText(-1)) { return }
+            # The sample reserves a blank cursor cell after the last wide character.
+            if ($caret.CompareEndpoints('Start', $last, 'Start') -le 0) { return }
+            $caret.ExpandToEnclosingUnit('Character')
+            $end = $caret.GetBoundingRectangles()
+            if ($end.Count -eq 1 -and $last.GetBoundingRectangles().Count) {
+                [pscustomobject]@{ Height = $h; Span = $end[0].Bottom - $first[0].Top }
+            }
+        }
+        if ($pt -eq 32) { $mediumHeight = $cell.Height }
+        if ($pt -eq 100) { $capHeight = $cell.Height }
+        # Native UIA caches a clipped origin. Use only its row span; anchor it to the XAML host at
+        # page offset zero. A tall specimen is fine if ordinary outer scrolling can reveal its end.
+        $start = $frame.Current.BoundingRectangle.Top
+        [void](WaitFor "last preview row reachable on the Settings page at $width DIPs / $pt pt" {
+            $view = $page.Current.BoundingRectangle
+            $travel = $view.Height * (100 / $scroll.Current.VerticalViewSize - 1)
+            $y = $start + $cell.Span - $cell.Height / 2 - $travel * $scroll.Current.VerticalScrollPercent / 100
+            $shown = [Windows.Rect]::Intersect($view, $frame.Current.BoundingRectangle)
+            if ($y -ge $shown.Top -and $y -lt $shown.Bottom) { return $true }
+            if ($travel -gt 0) { $scroll.SetScrollPercent(-1, [Math]::Min(100, 100 * ($cell.Span - $cell.Height) / $travel)) }
+        })
+    }
+    [PorchlightChrome]::Resize($window, $original.Width, $original.Height)
+}
 function CheckSettingsLayout($settings) {
     $settingsHwnd = [IntPtr]$settings.Current.NativeWindowHandle
     $original = $settings.Current.BoundingRectangle
@@ -114,7 +216,7 @@ function CursorOptions($settings) {
 }
 function CheckCursorShapes($settings) {
     $options = @(CursorOptions $settings)
-    if (($options.Current.Name -join ',') -cne 'Bar,Underscore,FilledBox,EmptyBox') { throw 'Unexpected cursor options or order' }
+    if (($options.Current.Name -join ',') -cne 'Vintage,Bar,Underscore,FilledBox,EmptyBox') { throw 'Unexpected cursor options or order' }
     foreach ($item in $options) {
         if ($item.FindFirst('Descendants', [PropertyCondition]::new([AutomationElement]::IsTextPatternAvailableProperty, $true))) {
             throw "$($item.Current.Name) uses a text glyph instead of cursor geometry"
@@ -122,23 +224,22 @@ function CheckCursorShapes($settings) {
     }
     $sample = FindId TerminalPreviewSample $settings
     $selected = [SelectionItemPattern]::Pattern
-    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Bar cursor') { throw 'Expected Bar in the preview' }
-    foreach ($item in $options[1..3]) {
+    if (!$options[0].GetCurrentPattern($selected).Current.IsSelected -or $sample.Current.HelpText -cne 'Vintage cursor') { throw 'Expected the live Vintage cursor in the preview' }
+    foreach ($item in $options[1..4]) {
         $item.GetCurrentPattern($selected).Select()
         [void](WaitFor "preview $($item.Current.Name) cursor" {
             $item.GetCurrentPattern($selected).Current.IsSelected -and $sample.Current.HelpText -ceq "$($item.Current.Name) cursor"
         })
     }
 }
-function CheckFontPicker($settings) {
+function CheckFontPicker($settings, $text) {
     $picker = WaitFor 'terminal font picker' {
         $p = FindId TerminalFontPicker $settings
         if ($p -and $p.Current.IsEnabled -and !$p.Current.IsOffscreen) { $p }
     }
     $reset = WaitFor 'reset fonts button' { FindId ResetFontsButton $settings }
-    $sample = WaitFor 'terminal preview sample' { FindId TerminalPreviewSample $settings }
-    $text = $sample.GetCurrentPattern([TextPattern]::Pattern)
     $launchFont = $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
+    if ($launchFont -isnot [string] -or !$launchFont -or $launchFont -ceq 'Consolas') { throw "Unexpected native launch font: '$launchFont'" }
     $value = $picker.GetCurrentPattern([ValuePattern]::Pattern)
     if ($value.Current.Value -or $reset.Current.IsEnabled) { throw 'Expected an empty picker inheriting the launch fonts' }
 
@@ -156,13 +257,12 @@ function CheckFontPicker($settings) {
     })
 }
 
-function CheckFontSize($settings) {
+function CheckFontSize($settings, $text) {
     $size = WaitFor 'font size editor' { FindId TerminalFontSize $settings }
     $range = $size.GetCurrentPattern([RangeValuePattern]::Pattern)
-    $sample = (FindId TerminalPreviewSample $settings).GetCurrentPattern([TextPattern]::Pattern)
     $up = FindId UpSpinButton $size
     if (!$up -or $up.Current.IsOffscreen -or $range.Current.Value -ne 14) { throw 'Expected an inline font size editor showing the launch size' }
-    $launchSize = $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute)
+    $launchHeight = WaitFor 'native preview cell height at 14 pt' { TerminalRowHeight $text 'git' }
 
     $edit = FindId InputBox $size
     $inputValue = $edit.GetCurrentPattern([ValuePattern]::Pattern)
@@ -173,13 +273,13 @@ function CheckFontSize($settings) {
         else { (FindId TerminalCategory $settings).SetFocus() }
     }
     CommitSizeText (12.5).ToString([cultureinfo]::CurrentCulture)
-    [void](WaitFor 'fractional size applied to the preview' {
-        $range.Current.Value -eq 12.5 -and $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute) -lt $launchSize
-    })
-    $fractionalSize = $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute)
+    $fractionalHeight = WaitFor "12.5 pt in editor and native cells shorter than $launchHeight px" {
+        $h = TerminalRowHeight $text 'git'
+        if ($range.Current.Value -eq 12.5 -and $h -gt 0 -and $h -lt $launchHeight) { $h }
+    }
     $up.GetCurrentPattern([InvokePattern]::Pattern).Invoke()
-    [void](WaitFor 'one-point spin step preserves the fraction' {
-        $range.Current.Value -eq 13.5 -and $sample.DocumentRange.GetAttributeValue([TextPattern]::FontSizeAttribute) -gt $fractionalSize
+    [void](WaitFor "one-point spin step to 13.5 pt and native cells taller than $fractionalHeight px" {
+        $range.Current.Value -eq 13.5 -and (TerminalRowHeight $text 'git') -gt $fractionalHeight
     })
     CommitSizeText ''
     [void](WaitFor 'clearing restores the last valid size in the editor' { $range.Current.Value -eq 13.5 -and $inputValue.Current.Value })
@@ -296,17 +396,33 @@ function CheckOpenTypePicker($settings) {
 }
 
 Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Code, Consolas') -BeforeConnect {
-    [void](WaitFor 'Settings available before the gateway hello' { SettingsButton })
     CheckNoGatewayControls $root
+    $settings = OpenSettings # The fake peer has not even read the gateway hello.
+    [void](WaitForTerminalText TerminalPreviewSample $settings $previewLines)
+    CloseSettings $settings
 } -Test {
     CheckNoGatewayControls $root
     SelectSpace core-local Personal $personal t75
+    $live = WaitForTerminalText PaneHost $root 'Fixture t75'
+    $liveHeight = WaitFor 'initial live terminal cell height' { TerminalRowHeight $live 'Fixture' }
     $settings = OpenSettings
-    if ($CheckFocus) { CheckCategoryFocus $settings }
+    $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
+    CheckPreviewPointer $settings $text
+    if ($CheckFocus) {
+        CheckCategoryFocus $settings
+        # The preview sits between navigation and the first editor. Tab must skip it.
+        SendSettingsKey $settings 0x09 0x0f
+        [void](WaitFor 'Tab skips the preview and enters the font picker' {
+            $picker = FindId TerminalFontPicker $settings
+            $picker.Current.HasKeyboardFocus -or $picker.FindFirst('Descendants',
+                [PropertyCondition]::new([AutomationElement]::HasKeyboardFocusProperty, $true))
+        })
+    }
     CheckScope core-local Personal $personal t75
     CheckSettingsLayout $settings
-    CheckFontPicker $settings
-    CheckFontSize $settings
+    CheckPreviewViewport $settings $text $liveHeight
+    CheckFontPicker $settings $text
+    CheckFontSize $settings $text
     CheckOpenTypePicker $settings
     CheckCursorShapes $settings
     if ($CheckFocus) {
@@ -317,5 +433,20 @@ Invoke-SmokeFixture -FontArguments @('--face="Unavailable, Fixture", Cascadia Co
     $again = OpenSettings
     if ($again.Current.NativeWindowHandle -ne $settings.Current.NativeWindowHandle) { throw 'Settings opened a different window' }
     CloseSettings $settings
+    $launchFace = $live.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute)
+    foreach ($cycle in 1..6) {
+        $settings = OpenSettings
+        $text = WaitForTerminalText TerminalPreviewSample $settings $previewLines
+        if ((FindId TerminalPreviewSample $settings).Current.HelpText -cne 'Vintage cursor' -or
+            (FindId TerminalFontSize $settings).GetCurrentPattern([RangeValuePattern]::Pattern).Current.Value -ne 14 -or
+            (TerminalRowHeight $text 'git') -ne $liveHeight -or
+            $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -cne $launchFace) { throw "Preview did not reset on reopen $cycle" }
+        (FindId TerminalFontPicker $settings).GetCurrentPattern([ValuePattern]::Pattern).SetValue('Consolas,')
+        [void](WaitFor "native font edit before close $cycle" { $text.DocumentRange.GetAttributeValue([TextPattern]::FontNameAttribute) -ceq 'Consolas' })
+        CloseSettings $settings
+    }
+    $state.catalogEdit.SetResult('retitle') # Require fresh traffic on the original peer after the repeated teardowns.
+    $personal.t75 = 't75 · π - Porchlight'
     CheckScope core-local Personal $personal t75
+    if (!$live.DocumentRange.GetText(-1).Contains('Fixture t75') -or (TerminalRowHeight $live 'Fixture') -ne $liveHeight) { throw 'Settings changed the live terminal' }
 }

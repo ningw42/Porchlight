@@ -280,7 +280,7 @@ public sealed partial class MainWindow : Window
         if (closing) return;
         if (settingsWindow == null)
         {
-            settingsWindow = new SettingsWindow(this, options.Font);
+            settingsWindow = new SettingsWindow(this, options.Font, options.Scheme);
             settingsWindow.Closed += (_, _) => settingsWindow = null;
         }
         settingsWindow.Activate();

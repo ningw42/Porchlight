@@ -17,7 +17,7 @@ public sealed partial class TerminalSettingsPage : Page
     readonly ObservableCollection<string> families = [];
     readonly ObservableCollection<string> selectedTags = [];
     readonly string[] installedFonts;
-    string launchFace = "", previewFace = "";
+    SettingsWindow.PreviewContext? context;
     FontFeatureOverrides? features;
     string? probedFamily;
     CancellationTokenSource? probing;
@@ -31,37 +31,50 @@ public sealed partial class TerminalSettingsPage : Page
         InitializeComponent();
         installedFonts = CanvasTextFormat.GetSystemFontFamilies().Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
-        foreach (var shape in new[] { CursorStyle.Bar, CursorStyle.Underscore, CursorStyle.FilledBox, CursorStyle.EmptyBox })
+        foreach (var shape in new[] { CursorStyle.Vintage, CursorStyle.Bar, CursorStyle.Underscore, CursorStyle.FilledBox, CursorStyle.EmptyBox })
         {
             var icon = new CursorVisual(shape) { FontSize = 16 };
             var item = new SegmentedItem { Content = icon };
             AutomationProperties.SetName(item, shape.ToString());
             ToolTipService.SetToolTip(item, shape.ToString());
             CursorShapePicker.Items.Add(item);
-            AppearancePreview.CursorFontChanged += icon.UseFont;
+            if (shape == TerminalSettings.DefaultCursorShape) CursorShapePicker.SelectedItem = item;
         }
-        CursorShapePicker.SelectedIndex = 0;
         TerminalFontPicker.ItemsSource = families;
         FeaturePicker.ItemsSource = selectedTags;
         families.CollectionChanged += (_, _) => UpdateFamilies();
-        Loaded += (_, _) => UpdateFamilies();
+        AppearancePreview.Loaded += (_, _) => UpdateFamilies();
+        AppearancePreview.CellMeasured += cell =>
+        {
+            // The samples and icons use the actual cell, including imported absolute/relative dimensions.
+            var em = Math.Clamp(TerminalFontSize.Value, 1, 100) * (96d / 72);
+            foreach (SegmentedItem item in CursorShapePicker.Items)
+                ((CursorVisual)item.Content).UseCell(cell.Width / em, cell.Height / em);
+        };
         Unloaded += (_, _) => { probing?.Cancel(); probing = null; probedFamily = null; TrackFeaturePopup(null); };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
-        var font = (TerminalFont)e.Parameter;
-        launchFace = font.Face;
+        context = (SettingsWindow.PreviewContext)e.Parameter;
+        var font = context.Font;
         TerminalFontSize.Value = font.Size;
         features = new(font.Features);
         RestoreFeatureTokens();
         UpdateFamilies();
     }
 
-    void CursorShapeChanged(object sender, SelectionChangedEventArgs e)
+    internal void ClosePreview() => AppearancePreview.Close();
+
+    void CursorShapeChanged(object sender, SelectionChangedEventArgs e) => UpdatePreview();
+
+    void UpdatePreview()
     {
-        if (CursorShapePicker.SelectedItem is SegmentedItem { Content: CursorVisual icon })
-            AppearancePreview.SetCursorShape(icon.Shape);
+        if (context == null || features == null || !AppearancePreview.IsLoaded ||
+            CursorShapePicker.SelectedItem is not SegmentedItem { Content: CursorVisual icon }) return;
+        var face = families.Count == 0 ? context.Font.Face : FontFamilyList.Format(families);
+        var font = context.Font with { Face = face, Size = (float)TerminalFontSize.Value, Features = new(features.Values) };
+        AppearancePreview.Update(context.Hwnd, context.Scheme, font, icon.Shape);
     }
 
     void Suggest(string query)
@@ -80,8 +93,7 @@ public sealed partial class TerminalSettingsPage : Page
             sender.Value = args.OldValue;
             return;
         }
-        // Terminal sizes are points; XAML and Win2D measure text in DIPs.
-        AppearancePreview.FontSize = args.NewValue * (96d / 72d);
+        UpdatePreview();
     }
 
     void FontQueryChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
@@ -98,16 +110,17 @@ public sealed partial class TerminalSettingsPage : Page
 
     void UpdateFamilies()
     {
-        if (features == null) return;
-        previewFace = families.Count == 0 ? launchFace : FontFamilyList.Format(families);
-        AppearancePreview.Update(previewFace, features.Values);
+        if (context == null || features == null || !AppearancePreview.IsLoaded) return;
+        UpdatePreview();
         ResetFontsButton.IsEnabled = families.Count != 0;
         Suggest("");
         // For inherited settings an earlier listed family may not be installed.
-        var primary = families.FirstOrDefault() ?? FontFamilyList.Parse(launchFace)
+        var primary = families.FirstOrDefault() ?? FontFamilyList.Parse(context.Font.Face)
             .FirstOrDefault(name => Array.BinarySearch(installedFonts, name, StringComparer.OrdinalIgnoreCase) >= 0) ?? "";
         if (probedFamily == primary) return; // Editing a fallback changes the preview, not the candidates.
         probedFamily = primary;
+        var metrics = CursorFont.ForFamily(primary, context.Font.Weight);
+        foreach (SegmentedItem item in CursorShapePicker.Items) ((CursorVisual)item.Content).UseFont(metrics);
         ProbeFeatures(primary);
     }
 
@@ -243,8 +256,8 @@ public sealed partial class TerminalSettingsPage : Page
 
     void UpdateFeatures()
     {
-        AppearancePreview.Update(previewFace, features!.Values);
-        ResetFeaturesButton.IsEnabled = features.CanReset;
+        UpdatePreview();
+        ResetFeaturesButton.IsEnabled = features!.CanReset;
     }
 
     void ResetFeatures(object sender, RoutedEventArgs e)

@@ -1,4 +1,5 @@
 using Microsoft.Graphics.Canvas.Text;
+using Windows.Foundation;
 using Microsoft.Terminal.Core;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -15,31 +16,28 @@ internal readonly record struct CursorFont(double Advance, double Ascent, double
 {
     public static CursorFont Fallback => new(.5, .8, .2, 0, -.1, .05);
 
-    public static CursorFont FromFace(CanvasFontFace? face)
+    public static CursorFont ForFamily(string family, ushort weight)
     {
-        if (face == null) return Fallback;
+        var fonts = CanvasFontSet.GetSystemFontSet();
+        using var matches = fonts.GetMatchingFonts(family.Length == 0 ? "Consolas" : family,
+            new Windows.UI.Text.FontWeight { Weight = weight }, Windows.UI.Text.FontStretch.Normal, Windows.UI.Text.FontStyle.Normal);
+        if (matches.Fonts.FirstOrDefault() is not { } face) return Fallback;
         var zero = face.GetGlyphIndices(['0']);
         var advance = zero[0] == 0 ? .5 : face.GetGlyphMetrics(zero, false)[0].AdvanceWidth;
         return new(advance, face.Ascent, face.Descent, face.LineGap, face.UnderlinePosition, face.UnderlineThickness);
     }
 }
 
-// Geometry shared by the picker and sample. Mirrors Windows Terminal's AtlasEngine font
-// metrics and BackendD2D::_drawCursor: resolve in physical pixels, then lay out in DIPs.
+// Picker icons only. The sample itself uses the terminal's own cursor.
 internal sealed class CursorVisual : UserControl
 {
     readonly Border ink = new() { HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
     CursorFont font = CursorFont.Fallback;
-    CursorStyle shape;
+    Size? measuredCell;
     XamlRoot? root;
     double scale;
 
-    public CursorStyle Shape
-    {
-        get => shape;
-        set { shape = value; UpdateGeometry(); }
-    }
-    public double Baseline { get; private set; }
+    public CursorStyle Shape { get; }
 
     public CursorVisual(CursorStyle shape)
     {
@@ -48,7 +46,7 @@ internal sealed class CursorVisual : UserControl
         IsTabStop = false;
         AutomationProperties.SetAccessibilityView(this, AccessibilityView.Raw);
         ink.SetBinding(Border.BorderBrushProperty, new Binding { Source = this, Path = new PropertyPath(nameof(Foreground)) });
-        this.shape = shape;
+        Shape = shape;
         Loaded += (_, _) => { root = XamlRoot; root.Changed += RootChanged; UpdateGeometry(); };
         Unloaded += (_, _) => { if (root != null) root.Changed -= RootChanged; root = null; };
         RegisterPropertyChangedCallback(FontSizeProperty, (_, _) => UpdateGeometry());
@@ -56,6 +54,15 @@ internal sealed class CursorVisual : UserControl
     }
 
     public void UseFont(CursorFont value) { font = value; UpdateGeometry(); }
+    // Cell dimensions in ems come from the actual terminal, not a second CSS-length parser.
+    public void UseCell(double width, double height)
+    {
+        var cell = new Size(width, height);
+        if (measuredCell == cell) return;
+        measuredCell = cell;
+        UpdateGeometry();
+    }
+
     void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
     {
         if (sender.RasterizationScale != scale) UpdateGeometry();
@@ -67,21 +74,26 @@ internal sealed class CursorVisual : UserControl
         scale = XamlRoot?.RasterizationScale ?? 1;
         var em = FontSize * scale;
         var advanceHeight = (font.Ascent + font.Descent + font.LineGap) * em;
-        var w = Math.Max(1, Round(font.Advance * em));
-        var h = Math.Max(1, Round(advanceHeight));
+        var w = Math.Max(1, Round((measuredCell?.Width ?? font.Advance) * em));
+        var h = Math.Max(1, Round(measuredCell is { } cell ? cell.Height * em : advanceHeight));
         var baseline = Round(font.Ascent * em + (font.LineGap * em + h - advanceHeight) / 2);
         var thin = Math.Max(1, Round(Math.Max(w / 16, h / 32)));
         Width = w / scale;
         Height = h / scale;
-        Baseline = baseline / scale;
 
         // A left border fills a bar or a box, a top border fills the underline, and four
         // borders outline the cell. All use the segment's current (including selected) foreground.
         ink.Width = Width;
         ink.Height = Height;
         ink.Margin = new Thickness(0);
-        switch (shape)
+        switch (Shape)
         {
+            case CursorStyle.Vintage:
+                var vintageHeight = Math.Clamp(Round(h * TerminalSettings.DefaultCursorHeight / 100), 1, h);
+                ink.Margin = new Thickness(0, (h - vintageHeight) / scale, 0, 0);
+                ink.Height = vintageHeight / scale;
+                ink.BorderThickness = new Thickness(Width, 0, 0, 0);
+                break;
             case CursorStyle.Bar:
                 ink.BorderThickness = new Thickness(thin / scale, 0, 0, 0);
                 break;

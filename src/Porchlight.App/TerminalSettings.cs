@@ -11,6 +11,18 @@ namespace Porchlight.App;
 
 internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bool isDark = true) : IControlSettings
 {
+    internal const CursorStyle DefaultCursorShape = CursorStyle.Vintage;
+    internal const uint DefaultCursorHeight = 25;
+
+    internal static TerminalSettings Create(TerminalFont font, TerminalScheme? scheme, CursorStyle cursor = DefaultCursorShape) => new(scheme)
+    {
+        FontFace = font.Face, FontSize = font.Size, FontWeight = new() { Weight = font.Weight },
+        CellHeight = font.CellHeight, CellWidth = font.CellWidth,
+        EnableBuiltinGlyphs = font.BuiltinGlyphs, EnableColorGlyphs = font.ColorGlyphs,
+        FontFeatures = NativeFeatures.Create(font.Features), FontAxes = NativeFeatures.Create(font.Axes),
+        CursorShape = cursor
+    };
+
     static Color Native(Rgb c) => new(c.R, c.G, c.B, 255);
     readonly Color[]? importedTable = scheme?.Ansi.Select(Native).ToArray();
     // ==================== Color Tables (ICoreScheme) ====================
@@ -104,9 +116,9 @@ internal sealed partial class TerminalSettings(TerminalScheme? scheme = null, bo
 
     public AdjustTextMode AdjustIndistinguishableColors { get; set; } = AdjustTextMode.Automatic;
 
-    public uint CursorHeight { get; set; } = 25;
+    public uint CursorHeight { get; set; } = DefaultCursorHeight;
 
-    public CursorStyle CursorShape { get; set; } = CursorStyle.Vintage;
+    public CursorStyle CursorShape { get; init; }
 
     public bool IntenseIsBold { get; set; } = false;
 

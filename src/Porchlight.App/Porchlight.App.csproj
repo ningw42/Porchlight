@@ -23,13 +23,18 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.251219" />
     <PackageReference Include="CommunityToolkit.WinUI.Controls.TokenizingTextBox" Version="8.2.251219" />
     <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.4.0" />
-    <PackageReference Include="XamlToolkit.WinUI.Terminal" Version="0.1.0-alpha" />
+    <PackageReference Include="XamlToolkit.WinUI.Terminal" Version="0.1.0-alpha" GeneratePathProperty="true" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260710003" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
   </ItemGroup>
-  <Target Name="BuildNativeFeatureMap" BeforeTargets="CopyFilesToOutputDirectory"
-          Inputs="Native/NativeFeatures.cpp;Native/build.cmd" Outputs="$(TargetDir)Porchlight.NativeFeatures.dll">
+  <Target Name="BuildNativeHelpers" BeforeTargets="CopyFilesToOutputDirectory"
+          Inputs="Native/NativeFeatures.cpp;Native/PreviewHost.cpp;Native/build.cmd;$(ProjectAssetsFile);$(MSBuildProjectFullPath)" Outputs="$(TargetDir)Porchlight.NativeFeatures.dll">
     <MakeDir Directories="$(IntermediateOutputPath)native;$(TargetDir)" />
+    <ItemGroup>
+      <PreviewWinmd Include="@(CsWinRTInputs);@(WindowsAppSdkComponentPackages->'%(Identity)metadata\Microsoft.Windows.ApplicationModel.Resources.winmd'->Exists())" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)native/projection.rsp" Overwrite="true"
+        Lines="-reference $(TargetPlatformVersion);-input &quot;$(PkgXamlToolkit_WinUI_Terminal)\lib\native&quot;;@(PreviewWinmd->'-input &quot;%(FullPath)&quot;')" />
     <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\build.cmd&quot; &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)native&quot; &quot;$(TargetDir)Porchlight.NativeFeatures.dll&quot;" />
     <ItemGroup><FileWrites Include="$(TargetDir)Porchlight.NativeFeatures.dll" /></ItemGroup>
   </Target>

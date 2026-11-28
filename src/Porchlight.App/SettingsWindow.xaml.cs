@@ -8,15 +8,18 @@ namespace Porchlight.App;
 
 public sealed partial class SettingsWindow : Window
 {
-    readonly TerminalFont launchFont;
+    internal sealed record PreviewContext(TerminalFont Font, TerminalScheme? Scheme, ulong Hwnd);
+    readonly PreviewContext preview;
 
-    internal SettingsWindow(Window owner, TerminalFont launchFont)
+    internal SettingsWindow(Window owner, TerminalFont launchFont, TerminalScheme? scheme)
     {
-        this.launchFont = launchFont;
+        preview = new(launchFont, scheme, (ulong)WinRT.Interop.WindowNative.GetWindowHandle(this));
         InitializeComponent();
         // Give the window a focus target before the page chooses its first editor.
         CategoryPage.Loaded += (_, _) => TerminalCategory.Focus(FocusState.Programmatic);
         Categories.SelectedItem = TerminalCategory;
+        // Stop the renderer while the Settings HWND and its XAML island are still valid.
+        Closed += (_, _) => (CategoryPage.Content as TerminalSettingsPage)?.ClosePreview();
 
         // Size in DIPs on the viewer's monitor; AppWindow coordinates are physical pixels.
         var parent = owner.AppWindow;
@@ -31,6 +34,6 @@ public sealed partial class SettingsWindow : Window
     void CategorySelected(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItemContainer == TerminalCategory)
-            CategoryPage.Navigate(typeof(TerminalSettingsPage), launchFont);
+            CategoryPage.Navigate(typeof(TerminalSettingsPage), preview);
     }
 }

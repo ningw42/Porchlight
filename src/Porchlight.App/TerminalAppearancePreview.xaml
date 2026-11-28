@@ -1,14 +1,7 @@
 <UserControl x:Class="Porchlight.App.TerminalAppearancePreview"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-  <Border Padding="16" CornerRadius="{ThemeResource ControlCornerRadius}" BorderThickness="1"
-          BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" Background="{x:Bind Background, Mode=OneWay}"
-          ToolTipService.ToolTip="{x:Bind FontFamily.Source, Mode=OneWay}">
-    <Grid x:Name="DrawingHost">
-      <TextBlock x:Name="TerminalPreviewSample" TextWrapping="Wrap"
-                 Text="C:\work&gt; git diff&#x0a;└─ != =&gt; ffi 0123456789 日本語&#xA0;" />
-      <Canvas x:Name="CursorLayer" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw" />
-    </Grid>
-  </Border>
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" IsTabStop="False">
+  <Border x:Name="TerminalPreviewSample" MinHeight="72" AutomationProperties.Name="Terminal appearance preview"
+          CornerRadius="{ThemeResource ControlCornerRadius}" BorderThickness="1"
+          BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" />
 </UserControl>

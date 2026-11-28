@@ -15,7 +15,7 @@ $app = (Resolve-Path '.\src\Porchlight.App\bin\x64\Debug\net10.0-windows10.0.261
 & $app
 ```
 
-Launch **the EXE in its build directory** with its DLLs, manifest and resources beside it. The project restores `XamlToolkit.WinUI.Terminal` **0.1.0-alpha** and builds `Porchlight.NativeFeatures.dll` from `src/Porchlight.App/Native/NativeFeatures.cpp` with x64 MSVC. No prebuilt host helper or app registration is required. The terminal package includes `OpenConsole.exe`; Porchlight does not launch it.
+Launch **the EXE in its build directory** with its DLLs, manifest and resources beside it. The project restores `XamlToolkit.WinUI.Terminal` **0.1.0-alpha** and generates C++/WinRT headers from the restored metadata, then compiles the helper in `src/Porchlight.App/Native/` with x64 MSVC. No prebuilt host helper or app registration is required. The terminal package includes `OpenConsole.exe`; Porchlight does not launch it.
 
 ## Connect to a real program
 
@@ -49,13 +49,15 @@ Use `--machine=yuki` to start on that configured remote instead of Local. To ope
 
 **Preview terminal fonts:** Open the sidebar gear and select **Terminal**. Under **Font families**, type an installed family name and select a suggestion or press Enter. Add families in fallback order; removing all tokens or choosing **Reset fonts** restores the launch list.
 
-**Font size** previews sizes up to 128 points. Use the arrows to step by 1 point, or type a fractional size such as `12.5` and press Enter.
+**Font size** accepts positive requests up to 128 points. The packaged terminal renderer limits the effective font size to 1–100 points, including for imported launch fonts; the preview uses that same renderer. Use the arrows to step by 1 point, or type a fractional size such as `12.5` and press Enter.
 
 **Ligatures** switches the optional `calt`, `liga`, `clig`, `dlig`, and `hlig` features together in the terminal preview. `calt` can affect letters as well as operators. Required ligatures (`rlig`) are left alone. With mixed launch settings, the switch reads on if any grouped feature is enabled; it leaves the original values intact until you change it.
 
 Focus **OpenType features** to browse the first installed family’s remaining tags, or type a prefix such as `ss`. Tags with a verified off/on preview appear first, followed by tags without one; each group is alphabetical, even when searching. The preview shows the shortest part of a sample that still changes: a single character when possible, a pair for kerning, or a cluster when needed. A dash means no example was found, not that the feature is unsupported. Adding a chip enables that tag; removing it explicitly disables it. **Reset ligatures and OpenType features** restores the launch overrides.
 
-Under **Cursor → Shape**, choose **Bar**, **Underscore**, **FilledBox** or **EmptyBox** to see it at the end of the sample. The picker and sample draw the same cursor geometry, not characters from the font. As in the [native terminal renderer](https://github.com/microsoft/terminal/blob/v1.25.1171.0/src/renderer/atlas/BackendD2D.cpp), the primary font supplies the cell dimensions and underline metrics. The sample is a static preview, not a running terminal. Closing Settings discards preview changes without modifying the live terminal or saving settings.
+Under **Cursor → Shape**, the preview starts with the live terminal’s **Vintage** cursor. Choose **Bar**, **Underscore**, **FilledBox** or **EmptyBox** to compare shapes at the end of the sample. Picker icons use the preview’s measured cell proportions, including imported cell width and height.
+
+The preview uses the same native terminal control, launch font settings and color scheme as the live pane. Porchlight supplies its own sample output; the preview never opens a shell, connects to a gateway, or accepts input. Closing Settings discards edits; it never changes the live pane or saves settings.
 
 **Use your Windows Terminal font** without editing its profile:
 
@@ -72,7 +74,7 @@ This reads `profiles.defaults.font` (the **shared** defaults, not per-profile ov
 & $app "--wt-font=$wt" '--wt-scheme=Catppuccin Mocha'
 ```
 
-The named entry in `schemes` supplies all 16 ANSI colors plus foreground, background, cursor and selection. The name must match and all 20 colors must be explicit `#RRGGBB` values; a missing or invalid scheme is an error, not a fallback. With `--wt-scheme` alone the app reads the packaged Windows Terminal **stable** settings file and keeps Porchlight's font defaults. The import affects the terminal pane, not Windows Terminal or the program; truecolor output still uses the RGB values requested by the program.
+The named entry in `schemes` supplies all 16 ANSI colors plus foreground, background, cursor and selection. The name must match and all 20 colors must be explicit `#RRGGBB` values; a missing or invalid scheme is an error, not a fallback. With `--wt-scheme` alone the app reads the packaged Windows Terminal **stable** settings file and keeps Porchlight's font defaults. The import affects the live pane and Settings preview, not Windows Terminal or the program; truecolor output still uses the RGB values requested by the program.
 
 **Without an import**, font options are still per launch. Defaults: `Cascadia Code, KaiTi, SimHei, Segoe UI Emoji, Symbols Nerd Font Mono`; `ss01=0`, `calt=1`. Put installed families in your preferred order. The native `IMap<String, Single>` includes both tags even when zero. Example:
 
